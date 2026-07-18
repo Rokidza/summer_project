@@ -1,0 +1,14 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+
+# unrelated local files not part of this project
+PITCH.docx
+optillm/
+
+# large raw per-request traces & server logs (regenerate with bench_configs.py)
+bench_results/guidellm_cfg_*.json
+bench_results/guidellm_baseline.json
+bench_results/server_*.log
+bench_results/run.log
