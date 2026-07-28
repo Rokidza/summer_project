@@ -1,0 +1,23 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# unrelated local files not part of this project
+PITCH.docx
+
+# optillm: a separate upstream checkout vendored locally, not a fork of this
+# repo. The router-device change (issue #8) lives there and is NOT tracked here.
+optillm/
+
+# staged model weights - GBs, fetched with supek/stage_model.sh
+models/
+
+# results databases, and the retired per-run JSONL/CSV output from the
+# pre-SQLite harness. Kept locally as reference, never committed.
+*.sqlite
+*.sqlite-journal
+results/
+eval_results/
+logs/

@@ -1,0 +1,65 @@
+#!/bin/bash
+# Interactive endpoint: bring the inference stack up and hold it there, so a
+# laptop can SSH-tunnel in and develop against a live model.
+#
+#     qsub supek/jobs/interactive.pbs
+#     qsub -l walltime=04:00:00 supek/jobs/interactive.pbs        # shorter session
+#     qsub -v MODEL_REPO=Qwen/Qwen3-14B-AWQ,SERVED_MODEL_NAME=qwen3-14b \
+#          supek/jobs/interactive.pbs
+#
+# Walltime is bounded on purpose: a forgotten session releases the GPU by
+# itself instead of burning the allocation until someone notices.
+#
+#PBS -N router_lab_interactive
+#PBS -q gpu
+#PBS -l select=1:ngpus=1:ncpus=16:mem=120gb
+#PBS -l walltime=08:00:00
+#PBS -j oe
+
+set -uo pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+source supek/config.sh
+source supek/serve.sh
+
+LOGDIR="$PBS_O_WORKDIR/logs/$PBS_JOBID"
+mkdir -p "$LOGDIR"
+
+start_servers "$LOGDIR"
+smoke_test
+
+NODE=$(hostname)
+cat <<EOF
+
+================================================================================
+  Inference stack is live.
+
+  Job:   $PBS_JOBID
+  Node:  $NODE
+  Model: $SERVED_MODEL_NAME  (from $MODEL_DIR)
+  Logs:  $LOGDIR
+
+  From your laptop, open the tunnel:
+
+      ssh -N -L ${OPTILLM_PORT}:${NODE}:${OPTILLM_PORT} ${USER}@${SUPEK_LOGIN}
+
+  Then point anything at http://localhost:${OPTILLM_PORT}/v1 :
+
+      curl http://localhost:${OPTILLM_PORT}/v1/models
+
+      python run_eval.py --model $SERVED_MODEL_NAME \\
+          --base-url http://localhost:${OPTILLM_PORT}/v1 \\
+          --approaches none bon router --dataset gsm8k --limit 20 \\
+          --db results.sqlite
+
+  To also reach vLLM directly (bypassing optillm), add:
+      -L ${VLLM_PORT}:${NODE}:${VLLM_PORT}
+
+  This job stops itself at its walltime. To end it sooner: qdel $PBS_JOBID
+================================================================================
+
+EOF
+
+# Hold the servers open for the rest of the walltime. PBS kills the job at the
+# bound; the EXIT trap installed by start_servers tears the servers down.
+wait $VLLM_PID

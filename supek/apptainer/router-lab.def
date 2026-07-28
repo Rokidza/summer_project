@@ -1,0 +1,72 @@
+# Apptainer image: vLLM + optillm + the eval harness, in one .sif.
+#
+# Everything the platform needs at runtime lives in here rather than in a pip
+# or conda tree on Lustre - thousands of small files are the filesystem's worst
+# case and degrade the cluster for everyone.
+#
+# Build on a login node (needs internet); see ../build_image.sh.
+
+Bootstrap: docker
+From: vllm/vllm-openai:v0.11.0
+
+%labels
+    Description  vLLM + optillm inference stack for the routing research platform
+    Maintainer   router-lab
+
+%post
+    set -eu
+
+    # The base image ships vLLM and its CUDA/torch stack already. Add optillm's
+    # *dependencies* on top - but deliberately NOT optillm itself.
+    #
+    # This project runs a locally modified optillm: its router takes a
+    # configurable device (defaulting to GPU) and its responses carry
+    # `optillm_router_approach`, which is how the harness learns what the
+    # router picked. A released PyPI build has neither, so installing one here
+    # would silently disable issue #12's entire comparison on cluster data.
+    # Instead the checkout is staged on Lustre and run from there; see
+    # OPTILLM_DIR in supek/config.sh.
+    pip install --no-cache-dir \
+        "flask" \
+        "z3-solver" \
+        "sympy" \
+        "scikit-learn" \
+        "networkx" \
+        "datasets" \
+        "openai" \
+        "transformers" \
+        "safetensors" \
+        "huggingface_hub"
+
+    # Neither optillm nor the harness is baked in: both are bind-mounted from
+    # Lustre at run time, so editing a grading rule or an approach does not
+    # mean rebuilding a multi-GB image.
+
+%environment
+    export PYTHONUNBUFFERED=1
+    # Kept off by default: it writes per-process files, and Lustre does not
+    # need more small-file churn.
+    export HF_HUB_DISABLE_TELEMETRY=1
+
+%runscript
+    exec "$@"
+
+%test
+    # Runs at the end of `apptainer build`, and again on demand via
+    # `apptainer test --nv router-lab.sif`. On a GPU node the CUDA check is the
+    # meaningful one; on a CPU-only login node it reports and moves on.
+    set -eu
+    python -c "import vllm; print('vllm', vllm.__version__)"
+    # optillm is not in the image by design - only its dependencies are, and
+    # these are the ones its approaches actually fail on when missing.
+    python -c "import flask, z3, sympy, sklearn, networkx; print('optillm deps ok')"
+    python -c "import transformers, safetensors; print('router classifier deps ok')"
+    python -c "
+import torch
+print('torch', torch.__version__)
+print('cuda available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('gpu:', torch.cuda.get_device_name(0))
+else:
+    print('no GPU visible here - re-run this on a GPU node with --nv')
+"

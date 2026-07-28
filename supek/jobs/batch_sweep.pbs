@@ -1,0 +1,99 @@
+#!/bin/bash
+# Unattended full sweep: start the stack, run every approach across every
+# dataset, write results to the SQLite store on Lustre, tear down, exit.
+#
+#     qsub supek/jobs/batch_sweep.pbs
+#     qsub -v DATASETS="gsm8k boolq humaneval mmlu",APPROACHES="none bon moa router",LIMIT=100 \
+#          supek/jobs/batch_sweep.pbs
+#     qsub -v MODEL_REPO=Qwen/Qwen3-14B-AWQ,SERVED_MODEL_NAME=qwen3-14b \
+#          supek/jobs/batch_sweep.pbs
+#
+# Afterwards, pull the database down and open it in the dashboard:
+#     ./supek/sync_results.sh
+#
+#PBS -N router_lab_sweep
+#PBS -q gpu
+#PBS -l select=1:ngpus=1:ncpus=16:mem=120gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -uo pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+source supek/config.sh
+source supek/serve.sh
+
+# What to sweep. Overridable at submission time with qsub -v.
+# The default approach list is every optillm technique worth measuring, plus
+# the `none` baseline (which every cost multiplier is relative to) and the
+# pretrained `router` (which the dashboard judges against the label rule).
+: "${APPROACHES:=none mcts bon moa rto z3 self_consistency pvg rstar cot_reflection plansearch leap re2 router}"
+: "${DATASETS:=gsm8k math500 boolq mmlu humaneval}"
+: "${LIMIT:=100}"
+: "${CONCURRENCY:=16}"
+: "${MAX_TOKENS:=1536}"
+
+# One run id for the whole sweep, so every dataset and approach below lands in
+# the store as a single identifiable run.
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+LOGDIR="$PBS_O_WORKDIR/logs/$PBS_JOBID"
+mkdir -p "$LOGDIR" "$(dirname "$RESULTS_DB")"
+
+echo "=============================================================="
+echo "  Sweep $RUN_ID  (job $PBS_JOBID on $(hostname))"
+echo "  model:      $SERVED_MODEL_NAME"
+echo "  datasets:   $DATASETS"
+echo "  approaches: $APPROACHES"
+echo "  limit:      $LIMIT per dataset"
+echo "  database:   $RESULTS_DB"
+echo "  logs:       $LOGDIR"
+echo "=============================================================="
+
+start_servers "$LOGDIR"
+smoke_test
+
+# A dataset that fails must not silently cost the whole sweep: record it, keep
+# going, and fail the job at the end so the failure is impossible to miss.
+failed=""
+for dataset in $DATASETS; do
+    echo
+    echo "--- $dataset ------------------------------------------------"
+    if apptainer exec --nv "$SIF" \
+        python run_eval.py \
+            --model "$SERVED_MODEL_NAME" \
+            --base-url "http://127.0.0.1:$OPTILLM_PORT/v1" \
+            --dataset "$dataset" \
+            --approaches $APPROACHES \
+            --limit "$LIMIT" \
+            --concurrency "$CONCURRENCY" \
+            --max-tokens "$MAX_TOKENS" \
+            --run-id "$RUN_ID" \
+            --db "$RESULTS_DB" \
+        2>&1 | tee "$LOGDIR/eval_$dataset.log"
+    then
+        echo "--- $dataset done"
+    else
+        echo "!!! $dataset FAILED - see $LOGDIR/eval_$dataset.log" >&2
+        failed="$failed $dataset"
+    fi
+done
+
+echo
+stop_servers
+echo "Servers stopped."
+
+if [ -n "$failed" ]; then
+    echo "SWEEP FAILED on:$failed" >&2
+    echo "Logs: $LOGDIR" >&2
+    exit 1
+fi
+
+echo
+echo "=============================================================="
+echo "  Sweep $RUN_ID complete."
+echo "  $RESULTS_DB"
+echo
+echo "  Pull it down and browse it:"
+echo "      ./supek/sync_results.sh"
+echo "      streamlit run router_lab/dashboard.py -- --db results.sqlite"
+echo "=============================================================="
