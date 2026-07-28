@@ -55,6 +55,11 @@ models. Browse them:
 streamlit run router_lab/dashboard.py -- --db results.sqlite
 ```
 
+Then open the URL it prints. It will not open a browser for you: under WSL with
+no `xdg-open`/`wslview`/`$BROWSER`, Streamlit's browser launch blocks the server
+before it answers anything — the port listens and every request hangs. So
+`.streamlit/config.toml` forces `headless = true`.
+
 The dashboard is a passive viewer over the file — it never connects to a
 cluster. On Supek, sweeps run unattended and the database is pulled down
 afterwards; see [supek/README.md](supek/README.md).

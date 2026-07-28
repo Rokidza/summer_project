@@ -1,0 +1,14 @@
+# Streamlit settings for the dashboard.
+
+[server]
+# Do not try to open a browser on startup.
+#
+# This is not just a preference. Under WSL with no `xdg-open`, no `wslview` and
+# no $BROWSER, Streamlit's browser-launch blocks before the server answers its
+# first request: the port listens, the terminal prints "You can now view your
+# app", and every request then hangs with no response. Headless skips the
+# launch entirely - open the printed URL yourself.
+headless = true
+
+[browser]
+gatherUsageStats = false
