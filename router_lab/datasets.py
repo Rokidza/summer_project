@@ -17,6 +17,14 @@ Config keys:
                           (gsm8k's answer is a worked solution ending "#### 42").
     list_style          - optional; how list-valued fields render:
                           "lines" (newline-joined) or "lettered" ("A) ...").
+                          A dict-valued field renders each of its values that
+                          way, so a template can reach into it: "{choices[text]}".
+    label_path          - optional; dotted path to the row field listing each
+                          option's own label ("choices.label"). Lettered
+                          rendering labels options by position, so where a
+                          dataset carries its own labels the gold is the
+                          position of `answer_key` in this list, not the
+                          label's face value.
     id_key              - optional; the row field holding a stable query id.
                           Defaults to the row index.
 """
@@ -70,6 +78,17 @@ DATASETS = {
         "list_style": {"choices": "lettered"},
         "answer_key": "answer",
     },
+    "arc_challenge": {
+        "path": "allenai/ai2_arc",
+        "name": "ARC-Challenge",
+        "split": "test",
+        "category": "multiple_choice",
+        "question_template": "{question}\n\n{choices[text]}",
+        "list_style": {"choices": "lettered"},
+        "answer_key": "answerKey",
+        "label_path": "choices.label",
+        "id_key": "id",
+    },
     "humaneval": {
         "path": "openai/openai_humaneval",
         "name": None,
@@ -115,13 +134,23 @@ def category_of(dataset_key: str) -> str:
     return DATASETS[dataset_key]["category"]
 
 
-def _render(value, style: str | None) -> str:
-    """Flatten a row field into template-ready text."""
+LETTERS = "ABCDEFGH"
+
+
+def _render(value, style: str | None) -> str | dict:
+    """Flatten a row field into template-ready text.
+
+    A dict is kept as a dict of rendered values, so a template can select one
+    of them by key ("{choices[text]}") rather than needing new config for every
+    dataset that nests its options.
+    """
+    if isinstance(value, dict):
+        return {key: _render(item, style) for key, item in value.items()}
     if not isinstance(value, (list, tuple)):
         return str(value)
     if style == "lettered":
         return "\n".join(
-            f"{letter}) {item}" for letter, item in zip("ABCDEFGH", value)
+            f"{letter}) {item}" for letter, item in zip(LETTERS, value)
         )
     return "\n".join(str(item) for item in value)
 
@@ -136,15 +165,38 @@ def _fill(template: str, row: dict, cfg: dict) -> str:
     )
 
 
+def _dig(row: dict, path: str):
+    """Follow a dotted config path into a row: "choices.label"."""
+    value = row
+    for step in path.split("."):
+        value = value[step]
+    return value
+
+
+def _gold_by_position(row: dict, cfg: dict) -> str:
+    """The letter of the option the gold label names, by its position."""
+    labels = [str(label) for label in _dig(row, cfg["label_path"])]
+    gold_label = str(row[cfg["answer_key"]])
+    if gold_label not in labels:
+        raise ValueError(
+            f"gold answer {gold_label!r} is not one of this row's option labels "
+            f"{labels} (row id {row.get(cfg.get('id_key', ''), '?')})"
+        )
+    return LETTERS[labels.index(gold_label)]
+
+
 def build_problem(index: int, row: dict, cfg: dict) -> Problem:
     """Turn one dataset row into a Problem, per its dataset's config."""
     if "gold_template" in cfg:
         gold = _fill(cfg["gold_template"], row, cfg)
     else:
-        answer_key = cfg["answer_key"]
-        gold = _render(row[answer_key], _style_of(cfg, answer_key))
-        if "gold_split" in cfg:
-            gold = gold.split(cfg["gold_split"])[-1]
+        if "label_path" in cfg:
+            gold = _gold_by_position(row, cfg)
+        else:
+            answer_key = cfg["answer_key"]
+            gold = _render(row[answer_key], _style_of(cfg, answer_key))
+            if "gold_split" in cfg:
+                gold = gold.split(cfg["gold_split"])[-1]
         gold = normalize_answer(gold, cfg["category"])
 
     query_id = str(row[cfg["id_key"]]) if "id_key" in cfg else str(index)

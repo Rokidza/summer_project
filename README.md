@@ -102,6 +102,22 @@ If its answers fit an existing category (`numeric`, `boolean`,
 },
 ```
 
+Two optional keys cover datasets that nest their options. A template reaches
+into a nested field with `{choices[text]}`, and `label_path` names the list of
+the options' own labels — options are always lettered by position, so where a
+dataset labels them itself (ARC-Challenge labels some rows `1`-`4`) the gold is
+that label's *position*, not its face value:
+
+```python
+"arc_challenge": {
+    ...
+    "question_template": "{question}\n\n{choices[text]}",
+    "list_style": {"choices": "lettered"},
+    "answer_key": "answerKey",
+    "label_path": "choices.label",
+},
+```
+
 A genuinely new answer shape adds one entry to each of `SYSTEM_PROMPTS`,
 `EXTRACTORS` and `NORMALIZERS` in
 [router_lab/grading.py](router_lab/grading.py) — and then the next dataset of

@@ -39,6 +39,44 @@ def test_multiple_choice_options_are_rendered_as_lettered_lines():
     assert problem.gold == "B"
 
 
+def test_choices_nested_under_a_field_are_reached_by_the_template():
+    problem = build_problem(
+        0,
+        {
+            "id": "Mercury_7175875",
+            "question": "Which is a mammal?",
+            "choices": {"text": ["Cod", "Bat", "Ant", "Eel"], "label": ["A", "B", "C", "D"]},
+            "answerKey": "B",
+        },
+        DATASETS["arc_challenge"],
+    )
+
+    assert problem.id == "Mercury_7175875"
+    assert problem.question == "Which is a mammal?\n\nA) Cod\nB) Bat\nC) Ant\nD) Eel"
+    assert problem.gold == "B"
+
+
+def test_a_gold_label_is_read_as_a_position_not_as_a_letter():
+    """Some ARC rows label their options 1-4; we always render them A-D.
+
+    Taken as an index, "1" would normalize to B — the second option — so the
+    gold has to come from where the label sits in the row's own label list.
+    """
+    problem = build_problem(
+        0,
+        {
+            "id": "MCAS_1998_5_5",
+            "question": "Which is a mammal?",
+            "choices": {"text": ["Bat", "Cod", "Ant", "Eel"], "label": ["1", "2", "3", "4"]},
+            "answerKey": "1",
+        },
+        DATASETS["arc_challenge"],
+    )
+
+    assert "A) Bat" in problem.question
+    assert problem.gold == "A"
+
+
 def test_a_code_dataset_golds_the_test_program_not_a_string_answer():
     problem = build_problem(
         0,
