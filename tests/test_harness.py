@@ -4,15 +4,19 @@ Every test here points the harness at a fake OpenAI-compatible server (see
 `tests.fake_server`) and asserts on what landed in a real SQLite store.
 """
 
+import sqlite3
+
 import pytest
 
 from router_lab.datasets import Problem
-from router_lab.harness import SweepSettings, run_sweep
+from router_lab.harness import SweepSettings, run_sweep, run_two_stage_sweep
 from router_lab.store import ResultsStore
 
 from tests.fake_server import FakeInferenceServer, completion
 
 PROBLEM = Problem(id="1", question="What is 2 + 2?", gold="4")
+
+POOL = [Problem(id=str(n), question=f"query {n}?", gold="4") for n in range(1, 7)]
 
 
 @pytest.fixture
@@ -175,6 +179,206 @@ def test_two_sweeps_into_one_database_stay_distinguishable_by_run(store, tmp_pat
 
     assert [r.run_id for r in store.list_runs()] == ["run-1", "run-2"]
     assert len(store.query_results(run_id="run-2")) == 1
+
+
+# -- two-stage sweeps ------------------------------------------------------
+
+
+def answers_wrong_on(*query_ids):
+    """A responder that fails exactly the named queries of `POOL`.
+
+    Scripted replies are consumed in arrival order, which a concurrent sweep
+    does not fix - so which query is answered wrongly is decided by looking at
+    the request.
+    """
+    wrong = {f"query {query_id}?" for query_id in query_ids}
+
+    def reply(payload):
+        asked = payload["messages"][-1]["content"]
+        return completion("\\boxed{5}" if asked in wrong else "\\boxed{4}")
+
+    return reply
+
+
+def two_stage(
+    store,
+    server,
+    *,
+    problems=POOL,
+    approaches=("none", "bon"),
+    control_fraction=0.0,
+    seed=0,
+    **overrides,
+):
+    run_two_stage_sweep(
+        store,
+        run_id="run-1",
+        dataset="gsm8k",
+        approaches=list(approaches),
+        problems=list(problems),
+        settings=settings_for(server, **overrides),
+        control_fraction=control_fraction,
+        seed=seed,
+        show_progress=False,
+    )
+
+
+def queries_touched(store, approach):
+    return {r.query_id for r in store.query_results(approach=approach)}
+
+
+def test_stage_one_runs_the_baseline_across_the_whole_pool(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2", "5")
+        two_stage(store, server)
+
+    assert queries_touched(store, "none") == {"1", "2", "3", "4", "5", "6"}
+
+
+def test_stage_two_runs_only_on_what_the_baseline_got_wrong(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2", "5")
+        two_stage(store, server, control_fraction=0.0)
+
+    assert queries_touched(store, "bon") == {"2", "5"}
+
+
+def test_a_baseline_error_sends_its_query_to_stage_two(store):
+    """An errored baseline is not a win, so the query still needs the field."""
+    with FakeInferenceServer() as server:
+        server.responder = lambda payload: (
+            500 if "query 3?" in payload["messages"][-1]["content"] else completion()
+        )
+        two_stage(store, server, approaches=("none", "bon"), retries=0)
+
+    assert queries_touched(store, "bon") == {"3"}
+
+
+def test_the_control_sample_adds_queries_the_baseline_answered(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(store, server, control_fraction=1.0)
+
+    assert queries_touched(store, "bon") == {"1", "2", "3", "4", "5", "6"}
+
+
+def test_the_same_seed_selects_the_same_control_sample(tmp_path):
+    def sample(seed):
+        with ResultsStore.open(tmp_path / f"seed-{seed}.sqlite") as store:
+            with FakeInferenceServer() as server:
+                server.responder = answers_wrong_on("2")
+                two_stage(store, server, control_fraction=0.5, seed=seed)
+            return queries_touched(store, "bon")
+
+    first, again = sample(11), sample(11)
+    assert first == again
+    assert len(first) == 4  # the one failure, plus half of the five it solved
+
+
+def test_both_stages_record_under_one_run_id(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(store, server)
+
+    runs = store.list_runs()
+    assert [r.run_id for r in runs] == ["run-1"]
+    assert runs[0].approaches == ["bon", "none"]
+
+
+def test_every_non_baseline_approach_runs_in_stage_two(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("4")
+        two_stage(store, server, approaches=("none", "bon", "moa"))
+
+    assert queries_touched(store, "bon") == {"4"}
+    assert queries_touched(store, "moa") == {"4"}
+
+
+def test_the_baseline_runs_once_even_when_it_is_not_requested(store):
+    """Stage one is the baseline by definition - the label rule needs it."""
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("4")
+        two_stage(store, server, approaches=("bon",))
+
+    assert queries_touched(store, "none") == {"1", "2", "3", "4", "5", "6"}
+    assert queries_touched(store, "bon") == {"4"}
+
+
+class StoreThatDies(ResultsStore):
+    """A real store that stops accepting writes part-way through a sweep.
+
+    Stands in for the process being killed mid-flight - the rows written before
+    it died are really in the database file, so the test can reopen it and see
+    exactly what survived.
+    """
+
+    def __init__(self, connection, crash_after: int):
+        super().__init__(connection)
+        self._writes_left = crash_after
+
+    @classmethod
+    def open_at(cls, path, *, crash_after: int) -> "StoreThatDies":
+        return cls(sqlite3.connect(str(path), check_same_thread=False), crash_after)
+
+    def write_result(self, result):
+        if self._writes_left == 0:
+            raise RuntimeError("sweep killed mid-flight")
+        self._writes_left -= 1
+        super().write_result(result)
+
+
+def test_a_two_stage_sweep_killed_mid_flight_keeps_the_work_it_finished(db_path):
+    """Same crash behaviour as a single-stage sweep: finished work stays put."""
+    dying = StoreThatDies.open_at(db_path, crash_after=len(POOL) + 2)
+
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on(*(p.id for p in POOL))
+        with pytest.raises(RuntimeError):
+            two_stage(dying, server, approaches=("none", "bon"), concurrency=1)
+    dying.close()
+
+    with ResultsStore.open(db_path) as store:
+        assert len(store.query_results(approach="none")) == len(POOL)
+        assert len(store.query_results(approach="bon")) == 2
+        assert store.sweep_configs(run_id="run-1")[0].mode == "two-stage"
+
+
+def test_the_sweep_configuration_is_recorded_for_the_run(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(store, server, approaches=("none", "bon"), control_fraction=0.25, seed=3)
+
+    config = store.sweep_configs(run_id="run-1")[0]
+    assert config.mode == "two-stage"
+    assert config.dataset == "gsm8k"
+    assert config.model == "qwen3-8b"
+    assert config.pool_size == 6
+    assert config.approaches == ["none", "bon"]
+    assert config.control_fraction == 0.25
+    assert config.seed == 3
+
+
+def test_a_single_stage_sweep_records_its_configuration_too(store):
+    with FakeInferenceServer() as server:
+        sweep(store, server, approaches=("none", "bon"), problems=POOL)
+
+    config = store.sweep_configs(run_id="run-1")[0]
+    assert config.mode == "single"
+    assert config.pool_size == 6
+    assert config.approaches == ["none", "bon"]
+    assert (config.control_fraction, config.seed) == (None, None)
+
+
+def test_stage_two_coverage_is_visible_through_the_store(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(store, server, approaches=("none", "bon"))
+
+    coverage = store.approach_coverage(
+        run_id="run-1", dataset="gsm8k", model="qwen3-8b"
+    )
+    assert coverage["2"] == ["bon", "none"]
+    assert coverage["1"] == ["none"]
 
 
 def test_code_datasets_are_graded_by_running_their_tests(store):

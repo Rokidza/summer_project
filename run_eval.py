@@ -15,13 +15,25 @@ browse them with the dashboard:
 Usage:
     python run_eval.py --model qwen3-8b --approaches none bon
     python run_eval.py --model qwen3-8b --approaches none bon moa router --limit 50
+    python run_eval.py --model qwen3-8b --approaches none bon moa --two-stage
+
+A full sweep is the platform's dominant expense, and most of it is spent on
+queries the baseline already answers correctly - which the label rule hands to
+the baseline regardless. `--two-stage` runs the baseline over the whole pool
+first, then the remaining approaches over what it got wrong plus a seeded
+control sample of what it got right.
 """
 
 import argparse
 import os
 
 from router_lab.datasets import DATASETS, load_problems
-from router_lab.harness import SweepSettings, new_run_id, run_sweep
+from router_lab.harness import (
+    SweepSettings,
+    new_run_id,
+    run_sweep,
+    run_two_stage_sweep,
+)
 from router_lab.store import DB_ENV_VAR, DEFAULT_DB, ResultsStore
 from router_lab.views import format_leaderboard, leaderboard
 
@@ -47,6 +59,23 @@ def parse_args(argv=None):
         default=None,
         help="defaults to a timestamp; reuse one to extend an existing run",
     )
+    ap.add_argument(
+        "--two-stage",
+        action="store_true",
+        help="baseline first, then the rest only where the baseline failed",
+    )
+    ap.add_argument(
+        "--control-fraction",
+        type=float,
+        default=0.1,
+        help="two-stage: share of baseline-solved queries stage two also runs",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="two-stage: makes the control sample reproducible",
+    )
     ap.add_argument("--base-url", default="http://localhost:8000/v1")
     ap.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "sk-no-key"))
     ap.add_argument("--concurrency", type=int, default=8)
@@ -63,8 +92,9 @@ def main(argv=None) -> None:
 
     print(f"Loading {args.dataset} ...")
     problems = load_problems(args.dataset, args.limit)
+    mode = "two-stage" if args.two_stage else "single-stage"
     print(
-        f"run {run_id}: {len(problems)} problems, "
+        f"run {run_id} ({mode}): {len(problems)} problems, "
         f"approaches: {', '.join(args.approaches)}\n"
     )
 
@@ -80,14 +110,26 @@ def main(argv=None) -> None:
     )
 
     with ResultsStore.open(args.db) as store:
-        run_sweep(
-            store,
-            run_id=run_id,
-            dataset=args.dataset,
-            approaches=args.approaches,
-            problems=problems,
-            settings=settings,
-        )
+        if args.two_stage:
+            run_two_stage_sweep(
+                store,
+                run_id=run_id,
+                dataset=args.dataset,
+                approaches=args.approaches,
+                problems=problems,
+                settings=settings,
+                control_fraction=args.control_fraction,
+                seed=args.seed,
+            )
+        else:
+            run_sweep(
+                store,
+                run_id=run_id,
+                dataset=args.dataset,
+                approaches=args.approaches,
+                problems=problems,
+                settings=settings,
+            )
         rows = leaderboard(
             store, run_id=run_id, dataset=args.dataset, model=args.model
         )

@@ -48,6 +48,26 @@ python run_eval.py --model qwen3-8b \
     --db results.sqlite
 ```
 
+Every labelled query costs one run of each approach, and most approaches fan
+out into many LLM calls — so a full sweep is the platform's dominant expense.
+Most of it is spent on queries the baseline already answers correctly, which
+the label rule hands to the baseline regardless. `--two-stage` runs the
+baseline over the whole pool first, then the other approaches over the queries
+it got *wrong*, plus a seeded control sample of the ones it got right (the
+control is what keeps dataset-level accuracy and cost comparisons honest):
+
+```bash
+python run_eval.py --model qwen3-8b \
+    --approaches none bon moa router \
+    --dataset gsm8k --limit 500 \
+    --two-stage --control-fraction 0.1 --seed 0
+```
+
+Both stages record under one run id, and the sweep's configuration is stored
+alongside its results, so how a run was produced is readable back from the
+database. Which approaches a given query was actually run through is *derived*
+from the rows (`ResultsStore.approach_coverage`), never written down.
+
 Results accumulate in one database across runs, datasets, approaches and
 models. Browse them:
 

@@ -13,6 +13,8 @@ passes straight through.
 
 from __future__ import annotations
 
+import math
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -22,8 +24,14 @@ from openai import OpenAI
 
 from router_lab.datasets import Problem, category_of
 from router_lab.grading import extract_answer, is_correct, system_prompt
-from router_lab.labels import BASELINE
-from router_lab.store import BenchmarkResult, ResultsStore
+from router_lab.labels import BASELINE, is_win
+from router_lab.store import (
+    SINGLE_STAGE,
+    TWO_STAGE,
+    BenchmarkResult,
+    ResultsStore,
+    SweepConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -162,10 +170,16 @@ def run_approach(
     category: str,
     settings: SweepSettings,
     show_progress: bool = True,
-) -> None:
-    """Run every problem through one approach, writing results as they land."""
+) -> list[BenchmarkResult]:
+    """Run every problem through one approach, writing results as they land.
+
+    Returns what it wrote, so a caller that must decide something from this
+    approach's outcomes - stage one of a two-stage sweep - does not have to read
+    the rows back out of the store.
+    """
     done = 0
     correct = 0
+    written: list[BenchmarkResult] = []
     with ThreadPoolExecutor(max_workers=settings.concurrency) as pool:
         futures = [
             pool.submit(
@@ -183,6 +197,7 @@ def run_approach(
         for future in as_completed(futures):
             result = future.result()
             store.write_result(result)
+            written.append(result)
             done += 1
             correct += result.correct
             if show_progress:
@@ -194,6 +209,7 @@ def run_approach(
                 )
     if show_progress:
         print()
+    return written
 
 
 def run_sweep(
@@ -213,6 +229,16 @@ def run_sweep(
     """
     category = category_of(dataset)
     client = _client(settings)
+    store.record_sweep_config(
+        SweepConfig(
+            run_id=run_id,
+            dataset=dataset,
+            model=settings.model,
+            mode=SINGLE_STAGE,
+            pool_size=len(problems),
+            approaches=list(approaches),
+        )
+    )
     for approach in approaches:
         if show_progress:
             print(f"Running {approach} ...")
@@ -220,6 +246,116 @@ def run_sweep(
             store,
             client,
             problems,
+            run_id=run_id,
+            dataset=dataset,
+            approach=approach,
+            category=category,
+            settings=settings,
+            show_progress=show_progress,
+        )
+
+
+def select_stage_two(
+    problems: Sequence[Problem],
+    baseline_results: Sequence[BenchmarkResult],
+    *,
+    control_fraction: float,
+    seed: int,
+) -> list[Problem]:
+    """The queries stage two owes work: every baseline failure, plus a control.
+
+    A query the baseline answered correctly already has its label - the label
+    rule makes the baseline the automatic winner there - so running twelve more
+    approaches on it buys a known outcome. The control sample is the exception:
+    without some of the solved queries also being run through every approach,
+    dataset-level accuracy and cost comparisons would only ever be drawn from
+    the hard end of the pool.
+
+    What counts as the baseline having answered is `labels.is_win`, so an
+    errored result is not a win and its query goes to stage two. The sample is
+    drawn in pool order rather than in the order stage one's concurrent results
+    happened to land, so the same seed picks the same control every time.
+    """
+    solved = {r.query_id for r in baseline_results if is_win(r)}
+    control_pool = [p.id for p in problems if p.id in solved]
+    size = min(len(control_pool), math.ceil(control_fraction * len(control_pool)))
+    control = set(random.Random(seed).sample(control_pool, size))
+    return [p for p in problems if p.id not in solved or p.id in control]
+
+
+def run_two_stage_sweep(
+    store: ResultsStore,
+    *,
+    run_id: str,
+    dataset: str,
+    approaches: Sequence[str],
+    problems: Sequence[Problem],
+    settings: SweepSettings,
+    control_fraction: float = 0.1,
+    seed: int = 0,
+    show_progress: bool = True,
+) -> None:
+    """Sweep in two stages, spending the fan-out only where it can change a label.
+
+    Stage one runs the baseline alone across the whole pool. Stage two runs
+    every other approach over `select_stage_two`'s selection. The baseline runs
+    whether or not it was requested, since stage two is defined against it.
+
+    Both stages write under one `run_id`, so a two-stage sweep is one run; and
+    as with `run_sweep`, results land as they complete, so a sweep that dies
+    part-way leaves its finished work behind.
+    """
+    category = category_of(dataset)
+    client = _client(settings)
+    store.record_sweep_config(
+        SweepConfig(
+            run_id=run_id,
+            dataset=dataset,
+            model=settings.model,
+            mode=TWO_STAGE,
+            pool_size=len(problems),
+            approaches=list(approaches),
+            control_fraction=control_fraction,
+            seed=seed,
+        )
+    )
+
+    if show_progress:
+        print(f"Stage 1: {BASELINE} over {len(problems)} problems ...")
+    baseline_results = run_approach(
+        store,
+        client,
+        problems,
+        run_id=run_id,
+        dataset=dataset,
+        approach=BASELINE,
+        category=category,
+        settings=settings,
+        show_progress=show_progress,
+    )
+
+    remaining = [approach for approach in approaches if approach != BASELINE]
+    if not remaining:
+        return
+
+    stage_two = select_stage_two(
+        problems,
+        baseline_results,
+        control_fraction=control_fraction,
+        seed=seed,
+    )
+    if show_progress:
+        print(
+            f"Stage 2: {len(stage_two)}/{len(problems)} problems "
+            f"({len(remaining)} approaches) ..."
+        )
+    for approach in remaining:
+        if show_progress:
+            print(f"Running {approach} ...")
+        run_approach(
+            store,
+            client,
+            stage_two,
             run_id=run_id,
             dataset=dataset,
             approach=approach,

@@ -12,6 +12,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Callable
 
 
 @dataclass
@@ -21,13 +22,19 @@ class FakeInferenceServer:
     replies: list = field(default_factory=list)
     """Each entry is a dict (a chat-completion body) or an int HTTP error status."""
     default_reply: dict | None = None
+    responder: Callable[[dict], dict | int] | None = None
+    """Answers from the request itself, for tests that need a *particular* query
+    answered a particular way. Scripted `replies` are order-dependent, which a
+    concurrent sweep does not give you."""
     requests: list = field(default_factory=list)
 
     _server: HTTPServer | None = None
     _thread: threading.Thread | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def next_reply(self) -> dict | int:
+    def next_reply(self, payload: dict) -> dict | int:
+        if self.responder is not None:
+            return self.responder(payload)
         with self._lock:
             if self.replies:
                 return self.replies.pop(0)
@@ -91,9 +98,10 @@ def _make_handler(fake: FakeInferenceServer):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - required by BaseHTTPRequestHandler
             length = int(self.headers.get("Content-Length", 0))
-            fake.record(json.loads(self.rfile.read(length) or b"{}"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            fake.record(payload)
 
-            reply = fake.next_reply()
+            reply = fake.next_reply(payload)
             if isinstance(reply, int):
                 self._respond(reply, {"error": {"message": "scripted failure"}})
             else:

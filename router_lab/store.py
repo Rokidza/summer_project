@@ -7,6 +7,7 @@ the database file or writes SQL.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from dataclasses import astuple, dataclass, fields
@@ -39,6 +40,37 @@ class BenchmarkResult:
     response: str = ""
 
 
+@dataclass(frozen=True)
+class SweepConfig:
+    """How one (run, dataset, model) sweep was configured - its provenance.
+
+    Recorded so a run's rows can be read years later without guessing how they
+    were produced: how big the pool was, which approaches were asked for, and -
+    for a two-stage sweep - the control fraction and seed that decided which
+    already-solved queries stage two also covered.
+
+    What is deliberately *not* here is per-query approach coverage: that is
+    counted off the result rows themselves (`approach_coverage`), so it cannot
+    drift away from them.
+    """
+
+    run_id: str
+    dataset: str
+    model: str
+    mode: str
+    """"single" (every approach over every query) or "two-stage"."""
+    pool_size: int
+    """Problems drawn for this dataset, i.e. how many stage one covered."""
+    approaches: list[str]
+    control_fraction: float | None = None
+    """Two-stage only: the share of baseline-solved queries stage two also ran."""
+    seed: int | None = None
+    """Two-stage only: what made the control sample reproducible."""
+
+
+SINGLE_STAGE = "single"
+TWO_STAGE = "two-stage"
+
 DEFAULT_DB = "results.sqlite"
 DB_ENV_VAR = "ROUTER_LAB_DB"
 """Where to read/write results when no --db is given. Job scripts and the sync
@@ -65,6 +97,18 @@ CREATE TABLE IF NOT EXISTS results (
     router_approach   TEXT,
     response          TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (run_id, dataset, model, approach, query_id)
+);
+
+CREATE TABLE IF NOT EXISTS sweep_configs (
+    run_id           TEXT    NOT NULL,
+    dataset          TEXT    NOT NULL,
+    model            TEXT    NOT NULL,
+    mode             TEXT    NOT NULL,
+    pool_size        INTEGER NOT NULL,
+    approaches       TEXT    NOT NULL,
+    control_fraction REAL,
+    seed             INTEGER,
+    PRIMARY KEY (run_id, dataset, model)
 );
 """
 
@@ -130,7 +174,81 @@ class ResultsStore:
             )
             self._conn.commit()
 
+    def record_sweep_config(self, config: SweepConfig) -> None:
+        """Record how a sweep was configured, replacing any earlier record of it.
+
+        Written before the sweep runs, so a sweep that dies part-way still says
+        what it set out to do - which is exactly when you want to know.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO sweep_configs "
+                "(run_id, dataset, model, mode, pool_size, approaches, "
+                " control_fraction, seed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    config.run_id,
+                    config.dataset,
+                    config.model,
+                    config.mode,
+                    config.pool_size,
+                    json.dumps(list(config.approaches)),
+                    config.control_fraction,
+                    config.seed,
+                ),
+            )
+            self._conn.commit()
+
     # -- reading ----------------------------------------------------------
+
+    def sweep_configs(
+        self,
+        *,
+        run_id: str | None = None,
+        dataset: str | None = None,
+        model: str | None = None,
+    ) -> list[SweepConfig]:
+        """Recorded sweep configurations, one per (run, dataset, model) cell."""
+        where, params = _where(run_id=run_id, dataset=dataset, model=model)
+        rows = self._fetch(
+            f"SELECT run_id, dataset, model, mode, pool_size, approaches, "
+            f"control_fraction, seed FROM sweep_configs{where} "
+            f"ORDER BY run_id, dataset, model",
+            params,
+        )
+        return [
+            SweepConfig(
+                run_id=row["run_id"],
+                dataset=row["dataset"],
+                model=row["model"],
+                mode=row["mode"],
+                pool_size=row["pool_size"],
+                approaches=json.loads(row["approaches"]),
+                control_fraction=row["control_fraction"],
+                seed=row["seed"],
+            )
+            for row in rows
+        ]
+
+    def approach_coverage(
+        self, *, run_id: str, dataset: str, model: str
+    ) -> dict[str, list[str]]:
+        """Which approaches each query in one cell was actually run through.
+
+        Derived by reading the rows, never stored: after a two-stage sweep the
+        queries the baseline solved carry the baseline alone, while the rest
+        carry the full set.
+        """
+        rows = self._fetch(
+            "SELECT query_id, approach FROM results "
+            "WHERE run_id = ? AND dataset = ? AND model = ? "
+            "ORDER BY CAST(query_id AS INTEGER), query_id, approach",
+            (run_id, dataset, model),
+        )
+        coverage: dict[str, list[str]] = {}
+        for row in rows:
+            coverage.setdefault(row["query_id"], []).append(row["approach"])
+        return coverage
+
 
     def query_results(
         self,

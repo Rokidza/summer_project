@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from router_lab.store import ResultsStore
+from router_lab.store import ResultsStore, SweepConfig
 
 from tests.conftest import build_result as make_result
 
@@ -157,6 +157,88 @@ def test_query_ids_are_distinct_and_numerically_ordered(db_path):
         ids = store.query_ids(run_id="run-1", dataset="gsm8k", model="qwen3-8b")
 
     assert ids == ["2", "10"]
+
+
+def build_config(**overrides) -> SweepConfig:
+    fields = dict(
+        run_id="run-1",
+        dataset="gsm8k",
+        model="qwen3-8b",
+        mode="two-stage",
+        pool_size=200,
+        approaches=["none", "bon", "moa"],
+        control_fraction=0.1,
+        seed=7,
+    )
+    fields.update(overrides)
+    return SweepConfig(**fields)
+
+
+def test_sweep_configuration_reads_back_for_a_run_id(db_path):
+    written = build_config()
+
+    with ResultsStore.open(db_path) as store:
+        store.record_sweep_config(written)
+
+    with ResultsStore.open(db_path) as store:
+        assert store.sweep_configs(run_id="run-1") == [written]
+
+
+def test_a_single_stage_sweep_records_no_control_fraction_or_seed(store):
+    store.record_sweep_config(
+        build_config(mode="single", control_fraction=None, seed=None)
+    )
+
+    config = store.sweep_configs(run_id="run-1")[0]
+    assert config.mode == "single"
+    assert config.control_fraction is None
+    assert config.seed is None
+
+
+def test_one_run_holds_a_configuration_per_dataset(store):
+    store.record_sweep_config(build_config(dataset="gsm8k", pool_size=200))
+    store.record_sweep_config(build_config(dataset="boolq", pool_size=50))
+
+    configs = store.sweep_configs(run_id="run-1")
+    assert [(c.dataset, c.pool_size) for c in configs] == [
+        ("boolq", 50),
+        ("gsm8k", 200),
+    ]
+
+
+def test_re_recording_the_same_cell_replaces_its_configuration(store):
+    store.record_sweep_config(build_config(pool_size=200))
+    store.record_sweep_config(build_config(pool_size=500))
+
+    assert [c.pool_size for c in store.sweep_configs(run_id="run-1")] == [500]
+
+
+def test_configurations_of_other_runs_are_not_returned(store):
+    store.record_sweep_config(build_config(run_id="run-1"))
+    store.record_sweep_config(build_config(run_id="run-2"))
+
+    assert [c.run_id for c in store.sweep_configs(run_id="run-2")] == ["run-2"]
+
+
+def test_approach_coverage_is_derived_from_the_stored_results(store):
+    """Coverage is never written down - it is counted off the rows themselves,
+    so it cannot drift away from them."""
+    store.write_results(
+        [
+            make_result(query_id="1", approach="none"),
+            make_result(query_id="1", approach="bon"),
+            make_result(query_id="2", approach="none"),
+        ]
+    )
+
+    coverage = store.approach_coverage(
+        run_id="run-1", dataset="gsm8k", model="qwen3-8b"
+    )
+    assert coverage == {"1": ["bon", "none"], "2": ["none"]}
+
+
+def test_approach_coverage_of_an_empty_cell_is_empty(store):
+    assert store.approach_coverage(run_id="nope", dataset="gsm8k", model="x") == {}
 
 
 def test_a_store_can_be_used_from_another_thread(db_path):

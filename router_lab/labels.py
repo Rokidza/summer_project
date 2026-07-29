@@ -64,13 +64,20 @@ def winning_approach(results: Iterable[BenchmarkResult]) -> str:
     that failed to complete has no trustworthy cost or answer. Neither are the
     meta-approaches, which route rather than reason.
     """
-    eligible = [r for r in results if _is_candidate(r)]
+    eligible = [r for r in results if is_win(r)]
     if not eligible:
         return BASELINE
     return min(eligible, key=_cost_key).approach
 
 
-def _is_candidate(result: BenchmarkResult) -> bool:
+def is_win(result: BenchmarkResult) -> bool:
+    """Whether a result counts as an approach having answered the query.
+
+    Correct, complete, and not a meta-approach. This module owns the rule, so
+    anything that has to know whether an approach succeeded - the label rule
+    itself, or the harness deciding which queries stage two still owes work -
+    asks here rather than re-deriving it.
+    """
     return (
         result.correct
         and result.error is None
@@ -82,7 +89,7 @@ def label_query(results: Sequence[BenchmarkResult]) -> QueryLabel:
     """The full verdict for one query: winner, whether it was a fallback, and
     what optillm's router predicted (when the `router` approach was among them)."""
     winner = winning_approach(results)
-    any_correct = any(_is_candidate(r) for r in results)
+    any_correct = any(is_win(r) for r in results)
     router_approach = next(
         (r.router_approach for r in results if r.approach == ROUTER), None
     )
