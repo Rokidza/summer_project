@@ -7,11 +7,14 @@ implementation detail: renaming `base_model`, `effort_encoder` or `classifier`
 loads weights into nothing and trains a randomly-initialised head while
 reporting nothing wrong. So it is defined here rather than imported from the
 `optillm/` checkout, and the drift test asserts upstream still matches.
+
+Which parameters of it a run trains is `regime.py`'s business, not this
+module's: the architecture is a contract with the checkpoint, while the regime is
+a knob on a run.
 """
 
 from __future__ import annotations
 
-from itertools import chain
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -84,22 +87,6 @@ def tokenizer_encoder(tokenizer, max_length: int = MAX_LENGTH) -> Encoder:
     return encode
 
 
-def freeze_to_head(model: OptILMClassifier) -> list[nn.Parameter]:
-    """Leave gradients on for the classification head and effort encoder only.
-
-    This is what makes the finetune fit in 4GB: the ~400M-parameter encoder
-    keeps no optimizer state and accumulates no gradients, so only activations
-    scale with batch size.
-    """
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    for parameter in chain(
-        model.effort_encoder.parameters(), model.classifier.parameters()
-    ):
-        parameter.requires_grad_(True)
-    return [p for p in model.parameters() if p.requires_grad]
-
-
 def load_pretrained_router(
     *, cache_dir: str | Path | None = None
 ) -> tuple[OptILMClassifier, Callable]:
@@ -121,5 +108,33 @@ def load_pretrained_router(
         repo_id=CHECKPOINT_REPO, filename="model.safetensors", cache_dir=cache_dir
     )
     load_model(model, safetensors_path)
+    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT_REPO, cache_dir=cache_dir)
+    return model, tokenizer
+
+
+def load_finetuned_router(
+    checkpoint_path: str | Path, *, cache_dir: str | Path | None = None
+) -> tuple[OptILMClassifier, Callable]:
+    """A checkpoint this repo's finetune wrote, with the tokenizer it trained on.
+
+    The encoder is built from its *config* rather than downloaded: a finetune
+    saves the whole `state_dict`, encoder included, so the published weights
+    would be loaded only to be immediately overwritten. The tokenizer still comes
+    from the checkpoint repository, because it is part of the same contract the
+    finetune trained under - a different tokenizer is a different input text.
+
+    `load_state_dict` is strict, so a checkpoint written against a different
+    architecture is refused here rather than serving predictions from
+    half-initialised layers.
+    """
+    from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+    base_model = AutoModel.from_config(
+        AutoConfig.from_pretrained(BASE_MODEL, cache_dir=cache_dir)
+    )
+    model = OptILMClassifier(base_model, num_labels=len(APPROACHES))
+    model.load_state_dict(
+        torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    )
     tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT_REPO, cache_dir=cache_dir)
     return model, tokenizer

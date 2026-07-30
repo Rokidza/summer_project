@@ -3,7 +3,14 @@
 No database, no network: every case is a hand-constructed set of results.
 """
 
-from router_lab.labels import BASELINE, label_query, label_run, winning_approach
+from router_lab.labels import (
+    BASELINE,
+    FINETUNED_ROUTER,
+    ROUTER,
+    label_query,
+    label_run,
+    winning_approach,
+)
 from router_lab.store import ResultsStore
 
 from tests.conftest import build_result as make_result
@@ -129,6 +136,54 @@ def test_label_carries_what_the_router_predicted():
     )
 
     assert label.router_approach == "moa"
+
+
+def test_the_finetuned_router_is_never_the_winner_either():
+    """It is trained on these labels, so letting it win would close the loop."""
+    results = [
+        result("none", correct=False, total_tokens=50),
+        result(FINETUNED_ROUTER, correct=True, total_tokens=90, router_approach="bon"),
+        result("bon", correct=True, total_tokens=300),
+    ]
+
+    assert winning_approach(results) == "bon"
+    assert label_query(results).any_correct is True
+
+
+def test_the_baseline_still_wins_when_only_the_finetuned_router_answered():
+    results = [
+        result("none", correct=False, total_tokens=50),
+        result(FINETUNED_ROUTER, correct=True, total_tokens=90, router_approach="moa"),
+    ]
+
+    label = label_query(results)
+    assert label.winner == BASELINE
+    assert label.any_correct is False
+
+
+def test_which_routers_prediction_is_reported_is_the_callers_choice():
+    """One sweep carrying both routers is two comparisons over identical queries."""
+    results = [
+        result("none", correct=True, total_tokens=50),
+        result(ROUTER, correct=True, total_tokens=90, router_approach="moa"),
+        result(FINETUNED_ROUTER, correct=True, total_tokens=60, router_approach="none"),
+    ]
+
+    stock = label_query(results)
+    finetuned = label_query(results, router=FINETUNED_ROUTER)
+
+    assert (stock.router, stock.router_approach) == (ROUTER, "moa")
+    assert (finetuned.router, finetuned.router_approach) == (FINETUNED_ROUTER, "none")
+    assert stock.winner == finetuned.winner == BASELINE
+
+
+def test_a_router_that_did_not_run_predicted_nothing_rather_than_something():
+    results = [
+        result("none", correct=True, total_tokens=50),
+        result(ROUTER, correct=True, total_tokens=90, router_approach="moa"),
+    ]
+
+    assert label_query(results, router=FINETUNED_ROUTER).router_approach is None
 
 
 def test_labels_are_produced_for_every_query_in_a_run(tmp_path):

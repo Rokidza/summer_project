@@ -1,9 +1,9 @@
 """The finetuning loop: labelled examples in, a checkpoint and a tracked run out.
 
-Deliberately thin. It trains the classification head and the effort encoder on
-top of optillm's frozen sentence encoder, and records loss, agreement with the
-label, and - given a table of recorded outcomes - what its predictions would
-actually have achieved.
+Deliberately thin. It trains the parameter set its regime names - by default the
+classification head and the effort encoder on top of optillm's frozen sentence
+encoder - and records loss, agreement with the label, and, given a table of
+recorded outcomes, what its predictions would actually have achieved.
 
 Agreement is kept as a diagnostic and named as one (`label_agreement`), because
 it is a poor score: a router that picks a *different* approach which solved the
@@ -11,11 +11,11 @@ same query at the same cost fails on agreement while doing a perfect job. The
 metrics a run is judged by come from `router_lab.policy` via
 `router_lab.training.evaluation`, and are realised accuracy and realised cost.
 
-What the loop does insist on is the parts that fail silently: the frozen
-encoder really is frozen, the effort feature really is the constant the plugin
-sends, the test split stays unscored unless a run asks for it, and provenance is
-written before the first batch so a run that dies half way still says what it
-was training on.
+What the loop does insist on is the parts that fail silently: the parameters the
+regime froze really are frozen, the effort feature really is the constant the
+plugin sends, the test split stays unscored unless a run asks for it, and
+provenance is written before the first batch so a run that dies half way still
+says what it was training on.
 
 The tracker is not closed here. The caller owns the run's lifetime, because a
 finetune is one phase of a longer session - evaluation follows it.
@@ -33,11 +33,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from router_lab.policy import OutcomeTable
-from router_lab.training.classifier import (
-    Encoder,
-    OptILMClassifier,
-    freeze_to_head,
-)
+from router_lab.training.classifier import Encoder, OptILMClassifier
 from router_lab.training.evaluation import (
     Evaluation,
     evaluate,
@@ -53,6 +49,14 @@ from router_lab.training.examples import (
     format_counts,
 )
 from router_lab.training.optillm_router import APPROACHES, INFERENCE_EFFORT
+from router_lab.training.regime import (
+    BALANCED,
+    DEFAULT_UNFROZEN_LAYERS,
+    HEAD,
+    apply_regime,
+    class_weights,
+    format_weights,
+)
 from router_lab.training.tracker import NullTracker, Tracker
 
 
@@ -66,6 +70,20 @@ class TrainingConfig:
     weight_decay: float = 0.01
     device: str = "auto"
     seed: int = 0
+    regime: str = HEAD
+    """Which parameters to train - see `router_lab.training.regime`.
+
+    The learning rate is *not* adjusted to suit it. A regime that unfreezes
+    encoder blocks normally wants one or two orders of magnitude lower than
+    the head's, so a fair comparison across regimes is a comparison at one
+    learning rate, and a comparison across (regime, learning rate) pairs is a
+    different, larger experiment - which the parameters record either way.
+    """
+    unfrozen_layers: int = DEFAULT_UNFROZEN_LAYERS
+    """How many top encoder blocks the `top_layers` regime trains; ignored by the
+    others, and logged regardless so a run's parameters are the same shape."""
+    class_weighting: str = BALANCED
+    """How to weight the objective against the label imbalance."""
     checkpoint_dir: Path = Path("checkpoints")
     run_name: str | None = None
     """Names the checkpoint file; defaults to a timestamp."""
@@ -85,6 +103,9 @@ class TrainingConfig:
             "train/weight_decay": self.weight_decay,
             "train/device": self.device,
             "train/seed": self.seed,
+            "train/regime": self.regime,
+            "train/unfrozen_layers": self.unfrozen_layers,
+            "train/class_weighting": self.class_weighting,
             "train/effort": INFERENCE_EFFORT,
             "train/label_space": ",".join(APPROACHES),
             "train/score_test": self.score_test,
@@ -144,10 +165,17 @@ def train_router(
 
     torch.manual_seed(config.seed)
     device = _resolve_device(config.device)
-    trainable = freeze_to_head(model)
+    trainable = apply_regime(
+        model, config.regime, unfrozen_layers=config.unfrozen_layers
+    )
     model.to(device)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
+
+    # Weighted from the *training* split alone: the validation and test splits
+    # are measurements, and deriving the objective from them would be leakage.
+    train_counts = examples.label_counts(TRAIN)
+    weights = class_weights(train_counts, scheme=config.class_weighting)
 
     tracker.log_params(
         {
@@ -156,15 +184,22 @@ def train_router(
             "train/trainable_parameters": sum(p.numel() for p in trainable),
             "train/n_train": len(train_examples),
             "train/n_validation": len(validation_examples),
-            "labels/train": format_counts(examples.label_counts(TRAIN)),
+            "labels/train": format_counts(train_counts),
             "labels/validation": format_counts(examples.label_counts(VALIDATION)),
+            "labels/class_weights": format_weights(train_counts, weights),
         }
     )
 
     optimizer = torch.optim.AdamW(
         trainable, lr=config.learning_rate, weight_decay=config.weight_decay
     )
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(
+        weight=(
+            None
+            if weights is None
+            else torch.tensor(weights, dtype=torch.float, device=device)
+        )
+    )
 
     passes = [
         _Pass(
@@ -244,7 +279,8 @@ def train_router(
 
     if device.type == "cuda":
         # The head-only regime exists to fit a 4GB laptop GPU; recording the peak
-        # turns that from a claim into a number each run can be checked against.
+        # turns that from a claim into a number each run can be checked against -
+        # and is what says which regimes a given GPU can actually host.
         tracker.log_summary(
             "peak_vram_mib", torch.cuda.max_memory_allocated(device) / 1024**2
         )

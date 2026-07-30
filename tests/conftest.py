@@ -2,7 +2,7 @@
 
 import pytest
 
-from router_lab.labels import ROUTER
+from router_lab.labels import FINETUNED_ROUTER, ROUTER
 from router_lab.policy import OutcomeTable
 from router_lab.store import BenchmarkResult, ResultsStore
 
@@ -59,15 +59,18 @@ def query_rows(
     model="qwen3-8b",
     question=None,
     router=None,
+    router_ft=None,
     **approaches,
 ):
     """One query's row per approach, given as `name=(correct, total_tokens)`.
 
     A third element in the tuple is an error message, and `router=(picked,
     correct, tokens)` adds the meta-approach's own row carrying what optillm's
-    pretrained router chose. Written this way because outcome-based scoring is
-    only ever interesting over a *matrix* of queries by approaches, and spelling
-    those out as full results row by row buries the case being tested.
+    pretrained router chose - with `router_ft=` the same for the finetuned one, so
+    a query swept through both routers is one call. Written this way because
+    outcome-based scoring is only ever interesting over a *matrix* of queries by
+    approaches, and spelling those out as full results row by row buries the case
+    being tested.
     """
     built = [
         build_result(
@@ -84,8 +87,10 @@ def query_rows(
         for approach, (correct, tokens, *rest) in approaches.items()
         for error in [rest[0] if rest else None]
     ]
-    if router is not None:
-        picked, correct, tokens = router
+    for approach, decision in ((ROUTER, router), (FINETUNED_ROUTER, router_ft)):
+        if decision is None:
+            continue
+        picked, correct, tokens = decision
         built.append(
             build_result(
                 run_id=run_id,
@@ -93,7 +98,7 @@ def query_rows(
                 model=model,
                 query_id=query_id,
                 question=question or f"question {query_id}",
-                approach=ROUTER,
+                approach=approach,
                 correct=correct,
                 total_tokens=tokens,
                 router_approach=picked,

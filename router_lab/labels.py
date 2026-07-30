@@ -29,12 +29,25 @@ BASELINE = "none"
 ROUTER = "router"
 """optillm's pretrained router - the thing this platform exists to judge."""
 
-META_APPROACHES = frozenset({ROUTER})
+FINETUNED_ROUTER = "router_ft"
+"""This repo's finetuned router, served as an optillm plugin.
+
+Its name is the plugin's slug, so a sweep asks for it exactly like any other
+approach - see `router_lab/finetuned_router.py` and `plugins/`.
+"""
+
+ROUTERS = (ROUTER, FINETUNED_ROUTER)
+"""Every router that can be swept, stock first. The order the dashboard offers."""
+
+META_APPROACHES = frozenset(ROUTERS)
 """Approaches that *choose* a technique rather than being one.
 
 They are never eligible to be the actual winner: the label is the target a
 router should aim at, so letting a router win its own comparison would be
-circular, and would train a future router to defer to another router.
+circular, and would train a future router to defer to another router. That
+applies to *our* finetuned router exactly as it does to optillm's: it is trained
+on these labels, so leaving it eligible would make the rule circular by the most
+direct route available.
 """
 
 
@@ -47,7 +60,9 @@ class QueryLabel:
     any_correct: bool
     """False means no approach was correct and `winner` is the baseline fallback."""
     router_approach: str | None = None
-    """What optillm's pretrained router picked, when the `router` approach ran."""
+    """What the router being compared picked, when it ran on this query."""
+    router: str = ROUTER
+    """Which router `router_approach` came from - the comparison's subject."""
 
 
 def _cost_key(result: BenchmarkResult) -> tuple:
@@ -92,13 +107,20 @@ def is_win(result: BenchmarkResult) -> bool:
     )
 
 
-def label_query(results: Sequence[BenchmarkResult]) -> QueryLabel:
+def label_query(
+    results: Sequence[BenchmarkResult], *, router: str = ROUTER
+) -> QueryLabel:
     """The full verdict for one query: winner, whether it was a fallback, and
-    what optillm's router predicted (when the `router` approach was among them)."""
+    what `router` predicted (when that router was among the approaches run).
+
+    The winner never depends on `router` - a router's own row is never eligible.
+    Which router is *reported* does, so one sweep carrying both of them can be
+    read as two comparisons over identical queries rather than one.
+    """
     winner = winning_approach(results)
     any_correct = any(is_win(r) for r in results)
     router_approach = next(
-        (r.router_approach for r in results if r.approach == ROUTER), None
+        (r.router_approach for r in results if r.approach == router), None
     )
     query_id = results[0].query_id if results else ""
     return QueryLabel(
@@ -106,18 +128,25 @@ def label_query(results: Sequence[BenchmarkResult]) -> QueryLabel:
         winner=winner,
         any_correct=any_correct,
         router_approach=router_approach,
+        router=router,
     )
 
 
 def label_run(
-    store: ResultsStore, *, run_id: str, dataset: str, model: str
+    store: ResultsStore,
+    *,
+    run_id: str,
+    dataset: str,
+    model: str,
+    router: str = ROUTER,
 ) -> list[QueryLabel]:
     """Label every query in one (run, dataset, model) cell."""
     return [
         label_query(
             store.results_for_query(
                 run_id=run_id, dataset=dataset, model=model, query_id=query_id
-            )
+            ),
+            router=router,
         )
         for query_id in store.query_ids(run_id=run_id, dataset=dataset, model=model)
     ]

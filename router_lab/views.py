@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from router_lab.datasets import DATASETS, category_of
-from router_lab.labels import BASELINE, ROUTER, label_query, label_run
+from router_lab.labels import BASELINE, ROUTER, ROUTERS, label_query, label_run
 from router_lab.store import ResultsStore
 
 
@@ -178,7 +178,7 @@ def query_detail(
     )
 
 
-# -- optillm's router vs. the actual winner -------------------------------
+# -- a router vs. the actual winner ---------------------------------------
 
 
 @dataclass(frozen=True)
@@ -204,7 +204,7 @@ class Disagreement:
 
 @dataclass(frozen=True)
 class RouterComparison:
-    """How optillm's pretrained router did against the label rule.
+    """How one router did against the label rule.
 
     Agreement is judged only on queries some approach actually got right. Where
     nothing was correct, the label falls back to the baseline, so counting those
@@ -212,6 +212,8 @@ class RouterComparison:
     reported separately as `n_no_winner`.
     """
 
+    router: str
+    """Which router this is about - optillm's stock one, or the finetuned one."""
     n_queries: int
     n_judged: int
     n_no_winner: int
@@ -231,6 +233,23 @@ def _datasets_in(store: ResultsStore, run_id: str, model: str) -> list[str]:
     return sorted({r.dataset for r in store.query_results(run_id=run_id, model=model)})
 
 
+def routers_compared(
+    store: ResultsStore, *, run_id: str, model: str
+) -> list[str]:
+    """Which routers a run actually swept, stock first.
+
+    The dashboard offers these as a choice rather than assuming both ran: a
+    finetuned router only exists once there is a checkpoint to serve. Falls back
+    to the stock router alone so a run with no router at all still renders the
+    comparison's "nothing to judge" state instead of an empty picker.
+    """
+    swept = {
+        summary.approach
+        for summary in store.aggregate_by_approach(run_id=run_id, model=model)
+    }
+    return [router for router in ROUTERS if router in swept] or [ROUTER]
+
+
 def router_comparison(
     store: ResultsStore,
     *,
@@ -238,12 +257,18 @@ def router_comparison(
     model: str,
     dataset: str | None = None,
     datasets: Sequence[str] | None = None,
+    router: str = ROUTER,
 ) -> RouterComparison:
-    """Compare the router's picks against the actual winners, with the headroom.
+    """Compare one router's picks against the actual winners, with the headroom.
 
     Scope defaults to everything in the run. Narrow it with `dataset` for one,
     or `datasets` for an arbitrary group - which is how the per-category
     breakdown is built, since a category spans several datasets.
+
+    `router` defaults to optillm's stock one, so every existing caller keeps
+    comparing what it always compared. Pointing it at the finetuned router
+    answers "did the finetune help?" from a single sweep, over identical queries,
+    rather than by comparing two runs.
 
     `oracle_*` is what an always-right router would have scored and spent;
     `baseline_*` is what never routing at all would have. The router sits
@@ -265,7 +290,9 @@ def router_comparison(
             (r.query_id, r.approach): r.total_tokens
             for r in store.query_results(run_id=run_id, dataset=ds, model=model)
         }
-        for label in label_run(store, run_id=run_id, dataset=ds, model=model):
+        for label in label_run(
+            store, run_id=run_id, dataset=ds, model=model, router=router
+        ):
             n_queries += 1
             oracle_tokens += costs.get((label.query_id, label.winner), 0)
             oracle_correct += label.any_correct
@@ -292,9 +319,10 @@ def router_comparison(
                 )
 
     baseline = _approach_totals(store, run_id, model, datasets, BASELINE)
-    router = _approach_totals(store, run_id, model, datasets, ROUTER)
+    routed = _approach_totals(store, run_id, model, datasets, router)
 
     return RouterComparison(
+        router=router,
         n_queries=n_queries,
         n_judged=n_judged,
         n_no_winner=n_no_winner,
@@ -306,16 +334,16 @@ def router_comparison(
         ],
         disagreements=disagreements,
         baseline_accuracy=baseline.accuracy,
-        router_accuracy=router.accuracy,
+        router_accuracy=routed.accuracy,
         oracle_accuracy=oracle_correct / n_queries if n_queries else 0.0,
         baseline_tokens=baseline.total_tokens,
-        router_tokens=router.total_tokens,
+        router_tokens=routed.total_tokens,
         oracle_tokens=oracle_tokens,
     )
 
 
 def comparisons_by_category(
-    store: ResultsStore, *, run_id: str, model: str
+    store: ResultsStore, *, run_id: str, model: str, router: str = ROUTER
 ) -> dict[str, RouterComparison]:
     """One comparison per task category, so it is visible whether the router is
     good everywhere or only on maths."""
@@ -328,7 +356,7 @@ def comparisons_by_category(
 
     return {
         category: router_comparison(
-            store, run_id=run_id, model=model, datasets=datasets
+            store, run_id=run_id, model=model, datasets=datasets, router=router
         )
         for category, datasets in sorted(by_category.items())
     }

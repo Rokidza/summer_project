@@ -51,6 +51,7 @@ echo "=============================================================="
 
 start_servers "$LOGDIR"
 smoke_test
+smoke_test_router_ft
 
 # A dataset that fails must not silently cost the whole sweep: record it, keep
 # going, and fail the job at the end so the failure is impossible to miss.

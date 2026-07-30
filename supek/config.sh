@@ -78,6 +78,19 @@
 # present (Supek) and falls back to CPU (laptop) - see router_plugin.py.
 : "${OPTILLM_ROUTER_DEVICE:=auto}"
 
+# This repo's own optillm plugins, served as ordinary approaches. optillm looks
+# for them in <OPTILLM_PLUGINS_DIR>/optillm/plugins, which is why the directory
+# it points at contains that nesting. Nothing in the upstream checkout changes.
+: "${OPTILLM_PLUGINS_DIR:=$PROJECT_DIR/plugins}"
+
+# The finetuned router (approach `router_ft`). Its checkpoint is configuration:
+# swapping it is one variable, not a container rebuild. Empty means the plugin
+# still loads but refuses to route, which is deliberate - a default checkpoint
+# would serve some other run's router under this one's name. Point it at a
+# checkpoint on Lustre that a worker node can see.
+: "${ROUTER_FT_CHECKPOINT:=}"
+: "${ROUTER_FT_DEVICE:=auto}"
+
 # -- container bind paths -------------------------------------------------
 # Apptainer only sees the host paths it is told to bind. Binding the Lustre
 # home covers the image's three inputs at once: the staged weights under
@@ -94,3 +107,6 @@ export HF_HOME
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export OPTILLM_ROUTER_DEVICE
+export OPTILLM_PLUGINS_DIR
+export ROUTER_FT_CHECKPOINT
+export ROUTER_FT_DEVICE

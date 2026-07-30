@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from router_lab.labels import FINETUNED_ROUTER, ROUTER
 from router_lab.store import DB_ENV_VAR, DEFAULT_DB, ResultsStore
 from router_lab.views import (
     QueryDetail,
@@ -25,7 +26,18 @@ from router_lab.views import (
     leaderboard,
     query_detail,
     router_comparison,
+    routers_compared,
 )
+
+ROUTER_NAMES = {
+    ROUTER: "optillm's pretrained router",
+    FINETUNED_ROUTER: "this repo's finetuned router",
+}
+"""How each router is described on screen. Presentation, so it lives here."""
+
+
+def router_name(router: str) -> str:
+    return ROUTER_NAMES.get(router, router)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -163,11 +175,11 @@ def render_query_detail(detail: QueryDetail) -> None:
 
 
 def render_router_comparison(report: RouterComparison, scope: str) -> None:
-    st.subheader(f"optillm's router vs. the actual winner - {scope}")
+    st.subheader(f"{router_name(report.router)} vs. the actual winner - {scope}")
     if report.n_judged == 0:
         st.info(
-            "No judgeable queries here: the `router` approach was not run, or no "
-            "approach ever answered correctly."
+            f"No judgeable queries here: the `{report.router}` approach was not "
+            f"run, or no approach ever answered correctly."
         )
         return
 
@@ -191,7 +203,7 @@ def render_router_comparison(report: RouterComparison, scope: str) -> None:
                     "tokens": report.baseline_tokens,
                 },
                 {
-                    "strategy": "optillm router",
+                    "strategy": f"`{report.router}`",
                     "accuracy": report.router_accuracy,
                     "tokens": report.router_tokens,
                 },
@@ -340,12 +352,32 @@ def main(argv: list[str] | None = None) -> None:
             )
 
     with router_tab:
+        # Which router is being judged is a choice, not a constant: a sweep can
+        # carry the stock router and the finetuned one over identical queries,
+        # and the interesting question is how they differ.
+        routers = routers_compared(store, run_id=run.run_id, model=model)
+        router = pick(
+            "Router",
+            routers,
+            key="router",
+            format_func=lambda name: f"{name} - {router_name(name)}",
+        )
+        if len(routers) == 1:
+            st.caption(
+                "Only one router ran in this sweep. Sweep `router` and "
+                "`router_ft` together to compare them here."
+            )
+
         overall = router_comparison(
-            store, run_id=run.run_id, model=model, dataset=dataset_filter
+            store,
+            run_id=run.run_id,
+            model=model,
+            dataset=dataset_filter,
+            router=router,
         )
         render_router_comparison(overall, scope=dataset or "all datasets")
         render_disagreement_drilldown(
-            store, overall, run.run_id, model, key="disagreement-overall"
+            store, overall, run.run_id, model, key=f"disagreement-overall-{router}"
         )
 
         if dataset_filter is None and len(run.datasets) > 1:
@@ -354,7 +386,7 @@ def main(argv: list[str] | None = None) -> None:
             st.divider()
             st.markdown("### Per category")
             for category, report in comparisons_by_category(
-                store, run_id=run.run_id, model=model
+                store, run_id=run.run_id, model=model, router=router
             ).items():
                 render_router_comparison(report, scope=category)
 
@@ -363,7 +395,11 @@ def main(argv: list[str] | None = None) -> None:
             for name in run.datasets:
                 render_router_comparison(
                     router_comparison(
-                        store, run_id=run.run_id, model=model, dataset=name
+                        store,
+                        run_id=run.run_id,
+                        model=model,
+                        dataset=name,
+                        router=router,
                     ),
                     scope=name,
                 )
