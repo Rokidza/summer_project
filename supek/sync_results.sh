@@ -7,6 +7,12 @@
 # This is the only link between the cluster and the dashboard: the dashboard is
 # a passive viewer over whatever file this leaves behind, and never talks to
 # Supek itself.
+#
+# It also pulls down anything a cluster finetune (issue #21) left behind: the
+# JSONL tracker files under $TRAINING_RUNS_DIR and the checkpoints under
+# $CHECKPOINT_DIR, into the same local ./runs and ./checkpoints directories
+# train_router.py itself uses - so `python replay_tracker.py runs/*.jsonl` and
+# ROUTER_FT_CHECKPOINT both find them with no path surgery.
 set -euo pipefail
 
 # This runs on the laptop, where config.sh's Lustre paths do not apply, so it
@@ -41,3 +47,24 @@ EOF
 
 echo
 echo "Browse it:  streamlit run router_lab/dashboard.py -- --db $LOCAL_DB"
+
+# A missing remote directory (no finetune has run yet) is not a sync failure -
+# rsync's own stderr is left visible so a real failure (auth, network) is not
+# confused with "nothing there yet".
+sync_dir() {
+    local remote_dir="$1" local_dir="$2" label="$3"
+    echo
+    if rsync -avh --progress "$SUPEK_USER@$SUPEK_LOGIN:$remote_dir/" "$local_dir/"
+    then
+        echo "Synced $label -> $local_dir"
+    else
+        echo "No $label to sync at $SUPEK_USER@$SUPEK_LOGIN:$remote_dir (none yet?)"
+    fi
+}
+
+sync_dir "$TRAINING_RUNS_DIR" ./runs "training runs"
+sync_dir "$CHECKPOINT_DIR" ./checkpoints "checkpoints"
+
+echo
+echo "Replay any new cluster runs into the local Aim repo:"
+echo "    python replay_tracker.py runs/router-*.jsonl"

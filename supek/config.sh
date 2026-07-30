@@ -91,6 +91,15 @@
 : "${ROUTER_FT_CHECKPOINT:=}"
 : "${ROUTER_FT_DEVICE:=auto}"
 
+# -- training (issue #21: the fully-unfrozen finetune) ---------------------
+# Where a cluster finetune writes its JSONL metrics and checkpoint, so the
+# existing sync workflow (sync_results.sh) can find and pull them down. These
+# mirror train_router.py's own local defaults ("runs", "checkpoints") one
+# level under the Lustre home, rather than under $RESULTS_DB's directory,
+# because a training run is not a results row.
+: "${TRAINING_RUNS_DIR:=$LUSTRE_HOME/runs}"
+: "${CHECKPOINT_DIR:=$LUSTRE_HOME/checkpoints}"
+
 # -- container bind paths -------------------------------------------------
 # Apptainer only sees the host paths it is told to bind. Binding the Lustre
 # home covers the image's three inputs at once: the staged weights under

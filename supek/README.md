@@ -23,7 +23,8 @@ Supek is SRCE's A100 cluster. Three facts shape everything here:
 | `serve.sh` | Starts vLLM + optillm, waits for genuine readiness, tears them down. | inside a job |
 | `jobs/interactive.pbs` | Live endpoint to SSH-tunnel into. | `qsub` |
 | `jobs/batch_sweep.pbs` | Unattended full sweep, then exit. | `qsub` |
-| `sync_results.sh` | Pulls the results database to the laptop. | laptop |
+| `jobs/finetune_full.pbs` | Fully-unfrozen router finetune on an A100, then exit. | `qsub` |
+| `sync_results.sh` | Pulls the results database, training runs and checkpoints to the laptop. | laptop |
 
 Plus one directory outside this one: `plugins/`, this repo's own optillm plugins
 (the finetuned router), discovered by the server from `$OPTILLM_PLUGINS_DIR`.
@@ -205,12 +206,74 @@ streamlit run router_lab/dashboard.py -- --db results.sqlite
 - [ ] The synced database opens in the dashboard showing all approaches and
       datasets with cost multipliers against the baseline.
 
+## Fully-unfrozen router finetune
+
+The laptop's 4GB GPU can run `--regime head` (and, tightly, `top_layers`), but
+not `--regime full`: fully finetuning the ~400M-parameter encoder needs roughly
+6GB for weights, gradients and optimizer state before activations even enter
+the picture. This job is the escape hatch, not the default loop - the other two
+regimes still run on the laptop with `train_router.py` directly.
+
+```bash
+qsub supek/jobs/finetune_full.pbs
+# or override:
+qsub -v EPOCHS=5,LEARNING_RATE=1e-5,RUN_NAME=full-2 supek/jobs/finetune_full.pbs
+```
+
+It reads `$RESULTS_DB` from Lustre, trains inside the existing image (torch,
+transformers and safetensors are already baked in - no pip/conda tree is
+created on Lustre for this), and records through the **JSONL tracker**, never
+Aim: an Aim repository must never be created on cluster storage. Metrics and
+the checkpoint land in `$TRAINING_RUNS_DIR` and `$CHECKPOINT_DIR`, which is
+where the existing sync workflow now looks.
+
+Then, on the laptop:
+
+```bash
+./supek/sync_results.sh
+python replay_tracker.py runs/router-<run-name>.jsonl
+aim up --repo .aim
+```
+
+The replayed run sits beside laptop-trained `head`/`top_layers` runs in the same
+Aim UI, comparable on the same charts - the whole point of the JSONL tracker.
+The checkpoint it produced is loadable by the `router_ft` serving plugin with
+no modification:
+
+```bash
+qsub -v ROUTER_FT_CHECKPOINT=$CHECKPOINT_DIR/router-<run-name>.pt,\
+APPROACHES="none bon moa router router_ft" supek/jobs/batch_sweep.pbs
+```
+
+**Checklist — issue #21**
+
+- [ ] The job runs the fully-unfrozen regime and exits on its own, with no
+      idle GPU time - `logs/<jobid>/train.log` shows `regime full`.
+- [ ] It records through the JSONL tracker; `apptainer` never has `aim`
+      importable inside it, and no `.aim` directory appears on Lustre.
+- [ ] `$TRACKER_FILE` and the checkpoint under `$CHECKPOINT_DIR` are present
+      after the job ends.
+- [ ] `./supek/sync_results.sh` pulls both down into `./runs` and
+      `./checkpoints` with no manual `scp`.
+- [ ] `python replay_tracker.py runs/router-<run-name>.jsonl` puts the run into
+      the local Aim repo, with the same parameters and metrics the log printed,
+      appearing alongside laptop runs.
+- [ ] `ROUTER_FT_CHECKPOINT` pointed at the pulled-down checkpoint serves it
+      with no code change and no rebuild.
+- [ ] No bare pip or conda tree was created on Lustre for training dependencies.
+
 ## Sizing
 
-`select=1:ngpus=1:ncpus=16:mem=120gb` is the default in both jobs: one A100 for
-an 8B AWQ model, cores for optillm's fan-out and the harness's thread pool, and
-RAM well clear of the framework's host-side buffers. Always state `mem` — a
-`select` without it grants 1800 MiB and the job gets OOM-killed by cgroups.
+`select=1:ngpus=1:ncpus=16:mem=120gb` is the default in the two serving jobs
+(`interactive.pbs`, `batch_sweep.pbs`): one A100 for an 8B AWQ model, cores for
+optillm's fan-out and the harness's thread pool, and RAM well clear of the
+framework's host-side buffers. Always state `mem` — a `select` without it
+grants 1800 MiB and the job gets OOM-killed by cgroups.
+
+`finetune_full.pbs` asks for less — `ngpus=1:ncpus=8:mem=64gb` — because it
+never starts vLLM or optillm: there is no fan-out to give cores to, and the
+~400M-parameter encoder plus optimizer state needs a fraction of the serving
+jobs' memory.
 
 Scaling to a bigger model means more GPUs *and* matching `TENSOR_PARALLEL_SIZE`:
 

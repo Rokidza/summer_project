@@ -1,0 +1,106 @@
+#!/bin/bash
+# Fully-unfrozen router finetune (issue #21): the escape hatch from the
+# laptop's 4GB VRAM ceiling, not the default loop.
+#
+# Fully finetuning the ~400M-parameter encoder needs roughly 6GB for weights,
+# gradients and optimizer state before activations - the laptop cannot host
+# that, and an A100 eats it in minutes. Everything this job needs (torch,
+# transformers, safetensors) is already in the image built by build_image.sh;
+# no pip/conda tree is created on Lustre for it.
+#
+#     qsub supek/jobs/finetune_full.pbs
+#     qsub -v EPOCHS=5,LEARNING_RATE=1e-5 supek/jobs/finetune_full.pbs
+#     qsub -v RUN_NAME=full-2 supek/jobs/finetune_full.pbs
+#
+# It records through the JSONL tracker, never Aim: Aim's RocksDB backend must
+# never be given a repository on cluster storage. Afterwards, pull the JSONL
+# and the checkpoint down with the existing sync workflow and replay the run
+# into the local Aim repo, landing beside the laptop's head/top-layers runs:
+#
+#     ./supek/sync_results.sh
+#     python replay_tracker.py runs/router-<run-name>.jsonl
+#     aim up --repo .aim
+#
+#PBS -N router_lab_finetune_full
+#PBS -q gpu
+#PBS -l select=1:ngpus=1:ncpus=8:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -uo pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+source supek/config.sh
+
+# No vLLM, no optillm - this is a training job, not a serving one.
+: "${EPOCHS:=3}"
+: "${BATCH_SIZE:=8}"
+# Deliberately far below the head regime's 1e-3 default: that learning rate
+# will wreck a full finetune, per train_router.py's own warning. The two
+# regimes are not comparable at the same rate, so this job does not inherit
+# the CLI's default.
+: "${LEARNING_RATE:=2e-5}"
+: "${WEIGHT_DECAY:=0.01}"
+: "${CLASS_WEIGHTS:=balanced}"
+: "${SPLIT_SEED:=0}"
+: "${SEED:=0}"
+
+RUN_NAME="${RUN_NAME:-full-$(date +%Y%m%d-%H%M%S)}"
+TRACKER_FILE="$TRAINING_RUNS_DIR/router-$RUN_NAME.jsonl"
+LOGDIR="$PBS_O_WORKDIR/logs/$PBS_JOBID"
+mkdir -p "$LOGDIR" "$TRAINING_RUNS_DIR" "$CHECKPOINT_DIR"
+
+echo "=============================================================="
+echo "  Fully-unfrozen router finetune  (job $PBS_JOBID on $(hostname))"
+echo "  run name:      $RUN_NAME"
+echo "  results db:    $RESULTS_DB"
+echo "  epochs:        $EPOCHS"
+echo "  learning rate: $LEARNING_RATE"
+echo "  tracker file:  $TRACKER_FILE"
+echo "  checkpoint:    $CHECKPOINT_DIR/router-$RUN_NAME.pt"
+echo "=============================================================="
+
+if [ ! -f "$RESULTS_DB" ]; then
+    echo "!!! no results database at $RESULTS_DB - run a sweep first" >&2
+    exit 1
+fi
+
+if apptainer exec --nv "$SIF" \
+    python train_router.py \
+        --db "$RESULTS_DB" \
+        --regime full \
+        --epochs "$EPOCHS" \
+        --batch-size "$BATCH_SIZE" \
+        --learning-rate "$LEARNING_RATE" \
+        --weight-decay "$WEIGHT_DECAY" \
+        --class-weights "$CLASS_WEIGHTS" \
+        --split-seed "$SPLIT_SEED" \
+        --seed "$SEED" \
+        --device cuda \
+        --checkpoint-dir "$CHECKPOINT_DIR" \
+        --run-name "$RUN_NAME" \
+        --tracker jsonl \
+        --tracker-file "$TRACKER_FILE" \
+        --experiment router-finetune \
+    2>&1 | tee "$LOGDIR/train.log"
+then
+    echo
+    echo "=============================================================="
+    echo "  Finetune $RUN_NAME complete."
+    echo "  metrics:    $TRACKER_FILE"
+    echo "  checkpoint: $CHECKPOINT_DIR/router-$RUN_NAME.pt"
+    echo
+    echo "  Pull both down and replay into the local Aim repo:"
+    echo "      ./supek/sync_results.sh"
+    echo "      python replay_tracker.py runs/router-$RUN_NAME.jsonl"
+    echo "      aim up --repo .aim"
+    echo
+    echo "  Serve the resulting checkpoint with the router_ft plugin by pointing"
+    echo "  ROUTER_FT_CHECKPOINT at it - no modification needed:"
+    echo "      qsub -v ROUTER_FT_CHECKPOINT=$CHECKPOINT_DIR/router-$RUN_NAME.pt,\\"
+    echo "           APPROACHES=\"none bon moa router router_ft\" supek/jobs/batch_sweep.pbs"
+    echo "=============================================================="
+else
+    echo "!!! finetune FAILED - see $LOGDIR/train.log" >&2
+    exit 1
+fi
