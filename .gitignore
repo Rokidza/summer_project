@@ -9,7 +9,11 @@ PITCH.docx
 
 # optillm: a separate upstream checkout vendored locally, not a fork of this
 # repo. The router-device change (issue #8) lives there and is NOT tracked here.
-optillm/
+#
+# Anchored to the root deliberately: an unanchored `optillm/` matches at every
+# depth, which silently swallowed this repo's own optillm plugins under
+# plugins/optillm/plugins/ - files that must be committed.
+/optillm/
 
 # staged model weights - GBs, fetched with supek/stage_model.sh
 models/

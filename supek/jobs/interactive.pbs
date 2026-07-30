@@ -27,6 +27,7 @@ mkdir -p "$LOGDIR"
 
 start_servers "$LOGDIR"
 smoke_test
+smoke_test_router_ft
 
 NODE=$(hostname)
 cat <<EOF

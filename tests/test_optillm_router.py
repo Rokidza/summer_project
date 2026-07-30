@@ -19,7 +19,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from router_lab.training.classifier import freeze_to_head  # noqa: E402
 from router_lab.training.optillm_router import (  # noqa: E402
     APPROACHES,
     EFFORT_ENCODER_WIDTH,
@@ -80,25 +79,6 @@ def test_the_label_space_keeps_optillms_order():
 
 def test_input_text_is_the_prompt_then_the_query():
     assert build_input_text("Be careful.", "2 + 2?") == "Be careful.\n\nUser: 2 + 2?"
-
-
-def test_freezing_leaves_gradients_on_the_head_alone():
-    model = tiny_classifier()
-
-    trainable = freeze_to_head(model)
-
-    names = {
-        name for name, p in model.named_parameters() if p.requires_grad
-    }
-    assert names == {
-        "effort_encoder.0.weight",
-        "effort_encoder.0.bias",
-        "effort_encoder.2.weight",
-        "effort_encoder.2.bias",
-        "classifier.weight",
-        "classifier.bias",
-    }
-    assert len(trainable) == len(names)
 
 
 def test_the_head_reads_the_pooled_token_and_the_effort_feature():

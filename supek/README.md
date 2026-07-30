@@ -25,6 +25,9 @@ Supek is SRCE's A100 cluster. Three facts shape everything here:
 | `jobs/batch_sweep.pbs` | Unattended full sweep, then exit. | `qsub` |
 | `sync_results.sh` | Pulls the results database to the laptop. | laptop |
 
+Plus one directory outside this one: `plugins/`, this repo's own optillm plugins
+(the finetuned router), discovered by the server from `$OPTILLM_PLUGINS_DIR`.
+
 ## Configuration
 
 `config.sh` holds every value, and each one can be overridden from the
@@ -66,6 +69,12 @@ Then copy up the optillm checkout, **from the laptop**:
 ```bash
 scp -r ./optillm <user>@login-cpu.hpc.srce.hr:/lustre/home/<user>/optillm
 ```
+
+The checkout stays a *pristine upstream dependency*: this repo's own plugins are
+never copied into it. `serve.sh` passes `--plugins-dir $OPTILLM_PLUGINS_DIR`
+(`$PROJECT_DIR/plugins` by default), which is where the finetuned router's plugin
+lives — so it is discovered rather than installed, and an upstream refresh cannot
+lose it.
 
 This step is not optional and not a convenience. optillm is *not* installed
 into the image, and the jobs run it from this checkout, because the copy this
@@ -130,6 +139,30 @@ Nothing about the harness changes between a laptop-served model and this — onl
       no OOM and `logs/<jobid>/vllm.log` shows no preemption storm.
 - [ ] A small sweep's results appear in the dashboard.
 - [ ] The job ends itself at walltime.
+
+**Checklist — issue #20** (the finetuned router as an approach)
+
+Submit with a checkpoint and it becomes an ordinary approach:
+
+```bash
+qsub -v ROUTER_FT_CHECKPOINT=/lustre/home/$USER/checkpoints/router-<run>.pt,\
+APPROACHES="none bon moa router router_ft" supek/jobs/batch_sweep.pbs
+```
+
+- [ ] `logs/<jobid>/optillm.log` shows `Loaded local plugin: router_ft` from
+      `$OPTILLM_PLUGINS_DIR/optillm/plugins`, and the upstream checkout at
+      `$OPTILLM_DIR` is unmodified (`git -C $OPTILLM_DIR status` is clean, if it
+      is a checkout at all).
+- [ ] `{"optillm_approach": "router_ft"}` answers, and the response's
+      `optillm_router_approach` names an approach — the log line
+      `Finetuned router predicted approach: ...` agrees with it.
+- [ ] `Loading finetuned router <path> on cuda` appears once, not per request.
+- [ ] Pointing `ROUTER_FT_CHECKPOINT` at a different checkpoint changes what is
+      served, with no rebuild of the image.
+- [ ] Unset, the job says the approach will refuse, and a `router_ft` request
+      fails with the variable named rather than silently routing to the baseline.
+- [ ] A sweep with both `router` and `router_ft` records both, over the same
+      queries, and the dashboard's router picker compares either.
 
 **Checklist — issue #8** (router device)
 

@@ -6,12 +6,14 @@ rendering layer itself is thin presentation and is not unit-tested.
 
 import pytest
 
+from router_lab.labels import FINETUNED_ROUTER, ROUTER
 from router_lab.views import (
     comparisons_by_category,
     format_leaderboard,
     leaderboard,
     query_detail,
     router_comparison,
+    routers_compared,
 )
 
 from tests.conftest import build_result as make_result
@@ -298,3 +300,103 @@ def test_comparison_over_a_run_with_no_router_results_is_empty_not_an_error(stor
 
     assert report.n_judged == 0
     assert report.agreement_rate is None
+
+
+# -- stock router vs. the finetuned one -----------------------------------
+#
+# Both are swept as ordinary approaches over identical queries, so "did the
+# finetune help?" is answerable from one run rather than by comparing two.
+
+
+@pytest.fixture
+def both_routers(store):
+    """Two queries; `bon` wins query 1, the baseline wins query 2.
+
+    The stock router picks moa both times (wrong twice); the finetuned one picks
+    what actually won.
+    """
+    store.write_results(
+        [
+            row("none", "1", correct=False, total_tokens=100),
+            row("bon", "1", correct=True, total_tokens=200),
+            row("moa", "1", correct=False, total_tokens=900),
+            row("router", "1", correct=False, total_tokens=910, router_approach="moa"),
+            row("router_ft", "1", correct=True, total_tokens=220,
+                router_approach="bon"),
+            row("none", "2", correct=True, total_tokens=100),
+            row("bon", "2", correct=True, total_tokens=200),
+            row("moa", "2", correct=True, total_tokens=900),
+            row("router", "2", correct=True, total_tokens=910, router_approach="moa"),
+            row("router_ft", "2", correct=True, total_tokens=110,
+                router_approach="none"),
+        ]
+    )
+    return store
+
+
+def test_the_comparison_defaults_to_the_stock_router(both_routers):
+    report = router_comparison(both_routers, run_id="run-1", model="qwen3-8b")
+
+    assert report.router == ROUTER
+    assert report.agreement_rate == 0.0
+
+
+def test_the_same_run_can_be_read_as_the_finetuned_routers_comparison(both_routers):
+    report = router_comparison(
+        both_routers, run_id="run-1", model="qwen3-8b", router=FINETUNED_ROUTER
+    )
+
+    assert report.router == FINETUNED_ROUTER
+    assert report.agreement_rate == 1.0
+    assert report.disagreements == []
+    # The same queries and the same winners - only the predictions differ.
+    assert report.n_queries == report.n_judged == 2
+    assert report.oracle_tokens == 300
+
+
+def test_each_routers_own_accuracy_and_spend_are_reported(both_routers):
+    stock = router_comparison(both_routers, run_id="run-1", model="qwen3-8b")
+    finetuned = router_comparison(
+        both_routers, run_id="run-1", model="qwen3-8b", router=FINETUNED_ROUTER
+    )
+
+    assert (stock.router_accuracy, stock.router_tokens) == (0.5, 1820)
+    assert (finetuned.router_accuracy, finetuned.router_tokens) == (1.0, 330)
+    assert stock.baseline_tokens == finetuned.baseline_tokens == 200
+
+
+def test_the_per_category_breakdown_follows_the_chosen_router(both_routers):
+    by_category = comparisons_by_category(
+        both_routers, run_id="run-1", model="qwen3-8b", router=FINETUNED_ROUTER
+    )
+
+    assert [report.router for report in by_category.values()] == [FINETUNED_ROUTER]
+    assert by_category["numeric"].agreement_rate == 1.0
+
+
+def test_the_routers_a_run_swept_are_listed_stock_first(both_routers):
+    assert routers_compared(both_routers, run_id="run-1", model="qwen3-8b") == [
+        ROUTER,
+        FINETUNED_ROUTER,
+    ]
+
+
+def test_only_the_routers_that_actually_ran_are_offered(store):
+    store.write_results(
+        [
+            row("none", "1", correct=True, total_tokens=100),
+            row("router_ft", "1", correct=True, total_tokens=110,
+                router_approach="none"),
+        ]
+    )
+
+    assert routers_compared(store, run_id="run-1", model="qwen3-8b") == [
+        FINETUNED_ROUTER
+    ]
+
+
+def test_a_run_with_no_router_at_all_still_offers_the_stock_one(store):
+    """So the comparison renders its "nothing to judge" state, not an empty picker."""
+    store.write_result(row("none", "1", correct=True, total_tokens=100))
+
+    assert routers_compared(store, run_id="run-1", model="qwen3-8b") == [ROUTER]

@@ -32,17 +32,23 @@ shows the lot in a local dashboard.
 | [router_lab/views.py](router_lab/views.py) | Shaped answers over the store — leaderboards, drill-down, router comparison. |
 | [router_lab/dashboard.py](router_lab/dashboard.py) | Streamlit presentation. No SQL, no logic. |
 | [router_lab/training/](router_lab/training/) | Finetuning optillm's router on the labels this platform makes. |
+| [router_lab/finetuned_router.py](router_lab/finetuned_router.py) | Serving a finetuned checkpoint: device, caching, prediction. |
+| [plugins/](plugins/) | This repo's optillm plugins. Discovered by the server, never installed into the upstream checkout. |
 | [run_eval.py](run_eval.py) | CLI for a sweep. |
 | [train_router.py](train_router.py) | CLI for a finetune. |
 | [replay_tracker.py](replay_tracker.py) | CLI to replay a cluster run's JSONL into the local Aim repository. |
 | [supek/](supek/) | Apptainer image, model staging, and PBS jobs for the cluster. |
 
-The dependency direction is strict: `dashboard → views → {store, labels}`, and
-`training → {store, labels, policy, datasets, grading}` with nothing pointing
-back. Nothing outside `store.py` writes SQL, nothing outside `dashboard.py`
-imports Streamlit, and nothing outside `training/aim_tracker.py` imports Aim.
-Within `training/`, only the modules that actually train import torch — building
-examples and scoring outcomes do not.
+The dependency direction is strict: `dashboard → views → {store, labels}`,
+`training → {store, labels, policy, datasets, grading}`, and
+`plugins → finetuned_router → training` — with nothing pointing back. Nothing
+outside `store.py` writes SQL, nothing outside `dashboard.py` imports Streamlit,
+and nothing outside `training/aim_tracker.py` imports Aim. Within `training/`,
+only the modules that actually train import torch — building examples, scoring
+outcomes and choosing a training regime do not, which is what keeps
+`train_router.py --dry-run` working without the deep-learning stack.
+`finetuned_router.py` is the one module outside `training/` that needs torch,
+because serving a classifier does.
 
 ## Running a sweep
 
@@ -94,8 +100,8 @@ afterwards; see [supek/README.md](supek/README.md).
 ## Finetuning the router
 
 The point of manufacturing labels is to train on them. The finetune continues
-optillm's published checkpoint on the winners this platform derived, with only
-the classification head and the effort encoder unfrozen — 18k trainable
+optillm's published checkpoint on the winners this platform derived, by default
+with only the classification head and the effort encoder unfrozen — 18k trainable
 parameters over a frozen 400M-parameter encoder, which is what makes it fit on
 a 4GB laptop GPU.
 
@@ -114,6 +120,54 @@ aim up --repo .aim                                     # then look at the run
 reference policies — no network, no GPU, and no training stack, since all of that
 is store, label-rule and dataset work. Do that first: a set built from too few
 queries, or one whose labels are all baseline, is a wasted training run.
+
+### How much of the model to train
+
+Three regimes, selected with `--regime`, so "how much of this should I actually
+train?" is three comparable runs in the Aim UI rather than a guess:
+
+| Regime | Trains | Fits 4GB? |
+|---|---|---|
+| `head` (default) | The classification head and the effort encoder. | yes |
+| `top_layers` | Those, plus the top `--unfrozen-layers` encoder blocks. | no |
+| `full` | Everything, all ~400M parameters. | no |
+
+Which one suits the data is a measurement, not a decision to make in advance —
+though head-only is expected to win at the label volumes this platform starts
+with, because fully finetuning 400M parameters on a few thousand
+heavily-imbalanced examples will memorise them inside an epoch. The regime, the
+trainable parameter count and the peak VRAM are all recorded per run, so which
+regimes a given GPU can host is a number rather than a claim. Running the
+unfrozen ones is a cluster job ([supek/](supek/README.md)).
+
+The learning rate is deliberately *not* adjusted to the regime. A run that
+unfreezes encoder blocks normally wants one or two orders of magnitude below
+the head's `1e-3`, but choosing it automatically would mean three runs differing
+in two things while claiming to differ in one. Set it yourself and the
+parameters say what was compared:
+
+```bash
+python train_router.py --db results.sqlite --regime head
+python train_router.py --db results.sqlite --regime top_layers \
+    --unfrozen-layers 4 --learning-rate 2e-5
+```
+
+Because they are scored on realised accuracy and realised cost rather than on
+loss, the three are directly comparable: selecting a regime on loss alone would
+mean selecting it on exactly the proxy metric this platform replaced.
+
+### The class imbalance
+
+It is structural, not incidental. The cheapest-correct rule makes the baseline
+the winner of every query it answers correctly, so a large majority of labels are
+`none` however the sweep is run — two-stage sweeping attacks that at the source,
+and the objective handles what is left. `--class-weights balanced` (the default)
+weights each class by the inverse of its frequency *in the training split*,
+normalised so the weights average to 1.0 across the split — which keeps a weighted
+run's loss curve on the same scale as an unweighted one's, so the two are readable
+on one chart. `--class-weights none` turns it off, which is how its effect gets
+measured. Both the scheme and the weights it produced are logged
+(`train/class_weighting`, `labels/class_weights`).
 
 Four things must agree between training and serving, and each is silent rather
 than loud when it does not, so all four are pinned — in
@@ -211,6 +265,59 @@ The test split is not scored unless a run asks for it with `--score-test`, and
 the headline never silently becomes the test score when it does: a test split
 scored on every run of a hyperparameter search is a validation split with extra
 steps.
+
+### Serving the finetuned router: it becomes just another approach
+
+A checkpoint is only worth anything once it is answering queries, so the
+finetuned router ships as an optillm plugin **this repo owns** —
+[plugins/optillm/plugins/router_ft_plugin.py](plugins/optillm/plugins/router_ft_plugin.py),
+registered under the approach name `router_ft`:
+
+```bash
+export ROUTER_FT_CHECKPOINT=checkpoints/router-20260730-1200.pt
+export ROUTER_FT_DEVICE=auto          # cpu / cuda / cuda:N
+
+cd plugins && python ../optillm/optillm.py \
+    --base-url http://localhost:8001/v1 --port 8000 --model qwen3-8b \
+    --plugins-dir "$PWD"
+
+python run_eval.py --model qwen3-8b \
+    --approaches none bon moa router router_ft --dataset gsm8k --limit 50
+```
+
+That last command is the whole point: **both routers over identical queries in
+one run.** "Did the finetune help?" is then a comparison inside one sweep rather
+than between two, and every existing view works on it unchanged — the leaderboard
+lists it, the drill-down shows what it picked per query, and the dashboard's
+"Router vs. winner" tab has a picker for which router it is judging (stock by
+default). The label rule counts it as a meta-approach, so it can never win a
+query it was trained to predict the winner of.
+
+The upstream checkout is not touched: no fork, no patch, nothing copied into it.
+Two details make that work, and both are load-bearing:
+
+- **The server is started from the plugin directory.** optillm discovers local
+  plugins in `<cwd>/optillm/plugins` — hence that nesting under `plugins/` — and
+  it loads them *before* it parses its arguments, so `--plugins-dir` does not
+  affect the startup load in the version vendored here. The flag is passed
+  anyway, so a fixed upstream keeps working.
+- **A missing plugin does not raise.** optillm encodes the requested approach by
+  prefixing the model name and parsing it back, so an unrecognised `router_ft`
+  is read as part of the model name and the request is served by the *baseline* —
+  which would land in the database as a `router_ft` row that never routed
+  anything. The only symptom is a missing `optillm_router_approach`, so
+  `serve.sh`'s `smoke_test_router_ft` fails the job on exactly that.
+
+The checkpoint and the device are configuration
+([finetuned_router.py](router_lab/finetuned_router.py)), so swapping checkpoints
+is one variable rather than a container rebuild. There is deliberately no default
+checkpoint: serving some other run's router under this one's name is worse than
+refusing to start. The classifier is loaded once and shared behind a lock, and the
+plugin vendors nothing itself — it reads the same architecture, input text, effort
+constant and label space the finetune trained against, because those four things
+are the checkpoint's contract. A failure raises rather than falling back to the
+baseline: the harness records a failed request as data, whereas a silent fallback
+would record a routing decision that never happened.
 
 ### Recording a cluster run: JSONL, then replay
 
@@ -338,7 +445,14 @@ Tests sit at the seams and use real-but-cheap dependencies rather than mocks:
   sequence.
 - **The upstream contract** — the drift guard reads optillm's plugin as *source*
   rather than importing it, and skips when the checkout is absent.
+- **This repo's optillm plugin** — loaded from its path exactly the way optillm
+  loads it, since that discovery convention *is* the interface. Its router and
+  its dispatch into optillm's approach stack are both replaced, so the tests
+  cover the plugin's own contribution — predict, delegate, report — with no
+  server and no checkpoint.
 
 PBS job scripts, Apptainer builds and cluster process lifecycle are out of
 scope for the automated suite — they are verified by the smoke-test checklists
-in [supek/README.md](supek/README.md).
+in [supek/README.md](supek/README.md). A real routed request through a real
+server is one of those: `serve.sh` makes it on every job that configures a
+checkpoint.

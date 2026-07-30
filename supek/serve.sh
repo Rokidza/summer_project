@@ -103,16 +103,40 @@ start_servers() {
     fi
 
     echo "Starting optillm (router device: $OPTILLM_ROUTER_DEVICE)"
+    echo "  plugins: $OPTILLM_PLUGINS_DIR/optillm/plugins"
+    if [ -n "$ROUTER_FT_CHECKPOINT" ]; then
+        # Checked here rather than on the first routed request: a sweep that asks
+        # for router_ft would otherwise fail one query at a time, deep in a job.
+        [ -f "$ROUTER_FT_CHECKPOINT" ] \
+            || die "ROUTER_FT_CHECKPOINT=$ROUTER_FT_CHECKPOINT does not exist (it must be a path a worker node can see)"
+        echo "  finetuned router: $ROUTER_FT_CHECKPOINT on $ROUTER_FT_DEVICE"
+    else
+        echo "  finetuned router: not configured (the router_ft approach will refuse)"
+    fi
     # Run optillm from the staged checkout, not from the image: the router's
     # configurable device and the optillm_router_approach response field are
-    # local modifications that a PyPI install does not have.
-    apptainer exec --nv "$SIF" \
-        python "$OPTILLM_DIR/optillm.py" \
-            --base_url "http://127.0.0.1:$VLLM_PORT/v1" \
-            --host "$BIND_HOST" \
-            --port "$OPTILLM_PORT" \
-            --model "$SERVED_MODEL_NAME" \
-        > "$SERVER_LOGDIR/optillm.log" 2>&1 &
+    # local modifications that a PyPI install does not have. This repo's own
+    # plugins are *not* copied in there - they are discovered from
+    # $OPTILLM_PLUGINS_DIR, so the checkout stays a pristine upstream copy.
+    #
+    # Started from that directory, and this is load-bearing rather than tidiness:
+    # optillm looks for local plugins in <cwd>/optillm/plugins, and it calls
+    # load_plugins() *before* it parses its arguments - so --plugins-dir has no
+    # effect on the startup load, and the working directory is what actually
+    # decides. The flag is passed anyway, so a fixed upstream keeps working. If
+    # neither took effect, a router_ft request would not error: optillm would
+    # quietly parse the unknown approach as part of the model name and serve the
+    # baseline. smoke_test_router_ft is what refuses to let that pass.
+    (
+        cd "$OPTILLM_PLUGINS_DIR" || exit 1
+        exec apptainer exec --nv "$SIF" \
+            python "$OPTILLM_DIR/optillm.py" \
+                --base_url "http://127.0.0.1:$VLLM_PORT/v1" \
+                --host "$BIND_HOST" \
+                --port "$OPTILLM_PORT" \
+                --model "$SERVED_MODEL_NAME" \
+                --plugins-dir "$OPTILLM_PLUGINS_DIR"
+    ) > "$SERVER_LOGDIR/optillm.log" 2>&1 &
     OPTILLM_PID=$!
 
     wait_for_http "optillm" "http://127.0.0.1:$OPTILLM_PORT/v1/models" \
@@ -140,4 +164,33 @@ smoke_test() {
     echo "$response" | grep -q '"content"' \
         || die "smoke test returned no completion content"
     echo "Smoke test passed."
+}
+
+# One real routed request through the finetuned router, when one is configured.
+#
+# This is not belt-and-braces: an undiscovered plugin does not error. optillm
+# encodes the requested approach by prefixing the model name and then parsing it
+# back, so an unknown `router_ft` is silently read as part of the model name and
+# the request is served by the *baseline* - which would land in the database as a
+# router_ft row that never routed anything. The only visible difference is a
+# missing optillm_router_approach, so that is what this checks.
+smoke_test_router_ft() {
+    [ -n "$ROUTER_FT_CHECKPOINT" ] || return 0
+
+    echo "Smoke-testing the finetuned router (router_ft) ..."
+    local response
+    response=$(curl -sf --max-time 600 \
+        "http://127.0.0.1:$OPTILLM_PORT/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\": \"$SERVED_MODEL_NAME\",
+             \"messages\": [{\"role\": \"user\", \"content\": \"What is 2 + 2?\"}],
+             \"max_tokens\": 64,
+             \"optillm_approach\": \"router_ft\"}") \
+        || die "router_ft request failed (see $SERVER_LOGDIR/optillm.log)"
+
+    echo "$response" | head -c 500
+    echo
+    echo "$response" | grep -q '"optillm_router_approach"' \
+        || die "router_ft answered but reported no prediction - the plugin was probably not discovered, and the request was served by the baseline (check 'Loaded local plugin: router_ft' in $SERVER_LOGDIR/optillm.log)"
+    echo "Finetuned router smoke test passed."
 }

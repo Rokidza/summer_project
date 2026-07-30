@@ -26,6 +26,13 @@ from router_lab.training.optillm_router import (  # noqa: E402
     APPROACHES,
     INFERENCE_EFFORT,
 )
+from router_lab.training.regime import (  # noqa: E402
+    BALANCED,
+    FULL,
+    HEAD,
+    TOP_LAYERS,
+    UNWEIGHTED,
+)
 from router_lab.training.train import (  # noqa: E402
     TrainingConfig,
     _loader,
@@ -138,6 +145,115 @@ def test_only_the_head_and_effort_encoder_receive_gradients(model, encode, confi
         for name, parameter in model.named_parameters()
         if name.startswith("base_model.")
     )
+
+
+def test_the_top_layers_regime_trains_the_top_block_as_well(model, encode, config):
+    """What a regime *trained* is read off the gradients, not off its name."""
+    train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=replace(config, regime=TOP_LAYERS, unfrozen_layers=1),
+    )
+
+    trainable = {name for name, p in model.named_parameters() if p.requires_grad}
+    assert any(name.startswith("base_model.layers.1.") for name in trainable)
+    assert not any(name.startswith("base_model.layers.0.") for name in trainable)
+
+
+def test_the_full_regime_trains_the_encoder_too(model, encode, config):
+    before = {
+        name: parameter.detach().clone() for name, parameter in model.named_parameters()
+    }
+
+    train_router(
+        make_examples(), model=model, encode=encode, config=replace(config, regime=FULL)
+    )
+
+    changed = {
+        name
+        for name, parameter in model.named_parameters()
+        if not torch.equal(parameter.detach(), before[name])
+    }
+    assert any(name.startswith("base_model.layers.0.") for name in changed), sorted(
+        changed
+    )
+
+
+def test_the_regime_and_its_trainable_count_are_recorded_as_parameters(
+    model, encode, config
+):
+    """Three runs differing only by regime have to be distinguishable in the UI."""
+    head, full = RecordingTracker(), RecordingTracker()
+
+    train_router(make_examples(), model=model, encode=encode, config=config, tracker=head)
+    train_router(
+        make_examples(),
+        model=tiny_classifier(),
+        encode=encode,
+        config=replace(config, regime=FULL),
+        tracker=full,
+    )
+
+    assert head.params["train/regime"] == HEAD
+    assert full.params["train/regime"] == FULL
+    assert (
+        full.params["train/trainable_parameters"]
+        > head.params["train/trainable_parameters"]
+    )
+
+
+def test_the_objective_is_weighted_from_the_training_splits_distribution(
+    model, encode, config
+):
+    tracker = RecordingTracker()
+
+    train_router(
+        make_examples(), model=model, encode=encode, config=config, tracker=tracker
+    )
+
+    # make_examples() alternates the two classes, so a balanced weighting of its
+    # train split is the neutral one - and says so rather than saying nothing.
+    assert tracker.params["train/class_weighting"] == BALANCED
+    assert tracker.params["labels/class_weights"] == "bon=1,none=1"
+
+
+def test_a_skewed_split_is_weighted_toward_the_rare_class(model, encode, config):
+    built = make_examples()
+    skewed = ExampleSet(
+        examples=[
+            e if i % 4 else replace(e, approach="bon", label=APPROACHES.index("bon"))
+            for i, e in enumerate(built.examples)
+        ],
+        provenance=built.provenance,
+    )
+    tracker = RecordingTracker()
+
+    train_router(
+        skewed, model=model, encode=encode, config=config, tracker=tracker
+    )
+
+    weights = dict(
+        pair.split("=") for pair in tracker.params["labels/class_weights"].split(",")
+    )
+    assert float(weights["none"]) > float(weights["bon"]) > 0
+
+
+def test_weighting_can_be_turned_off_so_its_effect_is_measurable(
+    model, encode, config
+):
+    tracker = RecordingTracker()
+
+    train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=replace(config, class_weighting=UNWEIGHTED),
+        tracker=tracker,
+    )
+
+    assert tracker.params["train/class_weighting"] == UNWEIGHTED
+    assert tracker.params["labels/class_weights"] == UNWEIGHTED
 
 
 def test_records_per_epoch_loss_and_agreement_under_a_subset_context(
