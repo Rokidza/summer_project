@@ -1,0 +1,32 @@
+[project]
+name = "router-lab"
+version = "0.1.0"
+description = "A research platform for LLM inference-time techniques and the routers that pick between them"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.40",
+    "datasets>=2.20",
+    "streamlit>=1.35",
+    "pandas>=2.0",
+]
+
+# Finetuning the router pulls in a deep-learning stack and a tracker. Neither
+# the harness nor the dashboard needs them, and on the cluster the sweep jobs
+# and the training job are separate images - so they stay an opt-in group:
+#
+#     uv pip install --python .venv/bin/python3 -e '.[train]'
+[project.optional-dependencies]
+train = [
+    "torch>=2.1",
+    "transformers>=4.48",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.24",
+    "aim>=3.25",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["router_lab", "router_lab.training"]

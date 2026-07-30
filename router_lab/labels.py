@@ -16,6 +16,13 @@ from typing import Iterable, Sequence
 
 from router_lab.store import BenchmarkResult, ResultsStore
 
+LABEL_RULE_VERSION = "1"
+"""Bumped whenever the rule below changes what it would call the winner.
+
+Recorded with every set of training examples built from it: a checkpoint
+trained under one rule and scored under another is comparing two things.
+"""
+
 BASELINE = "none"
 """The passthrough approach: no inference-time technique at all."""
 

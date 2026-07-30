@@ -21,3 +21,9 @@ models/
 results/
 eval_results/
 logs/
+
+# Aim's tracking repository - RocksDB databases, local disk only, never Lustre.
+.aim/
+# Finetuned router checkpoints, and JSONL tracker output from cluster runs.
+checkpoints/
+*.egg-info/
