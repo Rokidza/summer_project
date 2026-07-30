@@ -6,7 +6,11 @@ a trivial encoder at the seam the loop takes it through. Wiring is asserted -
 convergence is not.
 """
 
+from dataclasses import replace
+
 import pytest
+
+from router_lab.policy import ALWAYS_BASELINE, ORACLE
 
 torch = pytest.importorskip("torch")
 
@@ -22,7 +26,13 @@ from router_lab.training.optillm_router import (  # noqa: E402
     APPROACHES,
     INFERENCE_EFFORT,
 )
-from router_lab.training.train import TrainingConfig, train_router  # noqa: E402
+from router_lab.training.train import (  # noqa: E402
+    TrainingConfig,
+    _loader,
+    _run_epoch,
+    train_router,
+)
+from tests.conftest import outcome_table, query_rows  # noqa: E402
 from tests.recording_tracker import RecordingTracker  # noqa: E402
 from tests.tiny_router import VOCAB, tiny_classifier  # noqa: E402
 
@@ -130,7 +140,7 @@ def test_only_the_head_and_effort_encoder_receive_gradients(model, encode, confi
     )
 
 
-def test_records_per_epoch_loss_and_accuracy_under_a_subset_context(
+def test_records_per_epoch_loss_and_agreement_under_a_subset_context(
     model, encode, config
 ):
     tracker = RecordingTracker()
@@ -140,10 +150,13 @@ def test_records_per_epoch_loss_and_accuracy_under_a_subset_context(
     )
 
     assert len(tracker.metric_values("loss", subset=TRAIN)) == 2
-    assert len(tracker.metric_values("accuracy", subset=TRAIN)) == 2
+    assert len(tracker.metric_values("label_agreement", subset=TRAIN)) == 2
     assert len(tracker.metric_values("loss", subset=VALIDATION)) == 2
     assert [call.step for call in tracker.metrics if call.name == "loss"] == [1, 1, 2, 2]
-    assert all(0.0 <= value <= 1.0 for value in tracker.metric_values("accuracy", subset=TRAIN))
+    assert all(
+        0.0 <= value <= 1.0
+        for value in tracker.metric_values("label_agreement", subset=TRAIN)
+    )
 
 
 def test_the_test_split_is_never_scored(model, encode, config):
@@ -153,7 +166,9 @@ def test_the_test_split_is_never_scored(model, encode, config):
         make_examples(), model=model, encode=encode, config=config, tracker=tracker
     )
 
-    assert {TEST} not in [set(c.values()) for c in tracker.contexts_of("accuracy")]
+    assert {TEST} not in [
+        set(c.values()) for c in tracker.contexts_of("label_agreement")
+    ]
 
 
 def test_an_empty_validation_split_is_left_unlogged_not_logged_as_zero(
@@ -229,3 +244,171 @@ def test_the_same_seed_trains_the_same_head(encode, config, model):
     )
 
     assert tracker_b.metric_values("loss", subset=TRAIN) == first
+
+
+# -- realised outcomes ----------------------------------------------------
+#
+# The metrics a run is actually judged by. Whether the numbers are right is
+# `test_policy.py`; what these assert is that the loop joins its predictions to
+# the right queries and hands them over.
+
+
+def outcomes_for(n=12):
+    """A results table covering the queries `make_examples` builds.
+
+    Odd queries are the ones only `bon` solved, so a run that learns anything at
+    all can beat the always-baseline line - and one that predicts a single class
+    cannot.
+    """
+    return outcome_table(
+        *[
+            query_rows(
+                str(i),
+                none=(i % 2 == 0, 100),
+                bon=(True, 400),
+                router=("bon", True, 420),
+            )
+            for i in range(n)
+        ]
+    )
+
+
+def test_realised_outcomes_are_scored_when_an_outcome_table_is_given(
+    model, encode, config
+):
+    tracker = RecordingTracker()
+
+    result = train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=config,
+        tracker=tracker,
+        outcomes=outcomes_for(),
+    )
+
+    assert len(result.evaluations) == 2 * 2  # two epochs, two scored subsets
+    assert len(
+        tracker.metric_values("realised_accuracy", subset=TRAIN, policy="model")
+    ) == 2
+    assert tracker.metric_values(
+        "realised_accuracy", subset=VALIDATION, policy=ALWAYS_BASELINE
+    ) == [0.5, 0.5]
+    assert tracker.metric_values("coverage", subset=TRAIN, policy=ORACLE) == [1.0, 1.0]
+    # A head this fresh predicts approaches the sweep never ran, and those
+    # queries are unknown rather than wrong - which is exactly what coverage
+    # below 1 is there to say.
+    assert all(
+        0.0 <= evaluation.score.coverage <= 1.0 for evaluation in result.evaluations
+    )
+
+
+def test_realised_accuracy_and_cost_are_the_runs_headline(model, encode, config):
+    tracker = RecordingTracker()
+
+    result = train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=config,
+        tracker=tracker,
+        outcomes=outcomes_for(),
+    )
+
+    validation = [e for e in result.evaluations if e.subset == VALIDATION][-1]
+    assert tracker.summaries["final/subset"] == VALIDATION
+    assert tracker.summaries["final/realised_accuracy"] == validation.score.accuracy
+    assert (
+        tracker.summaries["final/cost_multiplier"] == validation.score.cost_multiplier
+    )
+    assert f"final/reference/{ORACLE}/realised_accuracy" in tracker.summaries
+
+
+def test_without_an_outcome_table_a_run_still_trains_but_scores_nothing(
+    model, encode, config
+):
+    tracker = RecordingTracker()
+
+    result = train_router(
+        make_examples(), model=model, encode=encode, config=config, tracker=tracker
+    )
+
+    assert result.evaluations == []
+    assert tracker.metric_values("loss", subset=TRAIN)
+    assert not [call for call in tracker.metrics if call.name == "realised_accuracy"]
+    assert "final/realised_accuracy" not in tracker.summaries
+
+
+def test_the_test_split_is_scored_only_when_a_run_asks_for_it(
+    model, encode, config, tmp_path
+):
+    tracker = RecordingTracker()
+
+    train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=config,
+        tracker=tracker,
+        outcomes=outcomes_for(),
+    )
+    assert TEST not in {
+        call.context.get("subset") for call in tracker.metrics
+    }
+
+    asked = RecordingTracker()
+    train_router(
+        make_examples(),
+        model=model,
+        encode=encode,
+        config=replace(config, score_test=True),
+        tracker=asked,
+        outcomes=outcomes_for(),
+    )
+
+    assert asked.metric_values("realised_accuracy", subset=TEST, policy="model")
+    assert asked.metric_values("realised_accuracy", subset=TEST, policy=ORACLE)
+    # ... and it is reported as the test split, never folded into the headline.
+    assert asked.summaries["final/subset"] == VALIDATION
+    assert "test/realised_accuracy" in asked.summaries
+
+
+def test_predictions_are_joined_to_queries_in_example_order_despite_shuffling():
+    """A shuffled join would score a plausible-looking policy over wrong queries."""
+    examples = [
+        Example(
+            query_id=str(i),
+            dataset="gsm8k",
+            text=chr(ord("a") + i),
+            approach="none",
+            label=0,
+            split=TRAIN,
+        )
+        for i in range(8)
+    ]
+
+    def encode(texts):
+        ids = torch.tensor([[ord(text[0]) % VOCAB] for text in texts])
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+    class ByFirstToken(torch.nn.Module):
+        """Predicts a label read straight off the input, so order is checkable."""
+
+        def forward(self, input_ids, attention_mask=None, effort=None):
+            first = input_ids[:, 0] % len(APPROACHES)
+            logits = torch.zeros(len(first), len(APPROACHES))
+            logits[torch.arange(len(first)), first] = 10.0
+            return logits
+
+    loader = _loader(examples, encode, batch_size=3, shuffle=True)
+    _, _, predictions = _run_epoch(
+        ByFirstToken(),
+        loader,
+        torch.nn.CrossEntropyLoss(),
+        None,
+        device=torch.device("cpu"),
+    )
+
+    assert predictions == [
+        (ord(e.text[0]) % VOCAB) % len(APPROACHES) for e in examples
+    ]

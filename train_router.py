@@ -13,17 +13,21 @@ Only the classification head and the effort encoder are trained; the ~400M
 parameter encoder stays frozen, which is what makes this fit on a 4GB laptop
 GPU. Which regime to train under becomes a choice in #18.
 
-`--dry-run` builds the examples and prints their provenance without touching
-the network or a GPU - worth doing first, because a set built from too few
-queries or with poor approach coverage is a wasted training run.
+`--dry-run` builds the examples, prints their provenance, and scores the four
+reference policies without touching the network or a GPU - worth doing first,
+because a set built from too few queries or with poor approach coverage is a
+wasted training run, and because the reference scores say what the finetune has
+to beat to have been worth running at all.
 """
 
 import argparse
 import os
 from pathlib import Path
 
+from router_lab.policy import outcomes_for_runs, reference_scores
 from router_lab.store import DB_ENV_VAR, DEFAULT_DB, ResultsStore
-from router_lab.training.examples import TEST, build_examples
+from router_lab.training.evaluation import keys_of
+from router_lab.training.examples import TEST, VALIDATION, build_examples
 
 
 def parse_args(argv=None):
@@ -45,6 +49,11 @@ def parse_args(argv=None):
     ap.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:N")
     ap.add_argument("--checkpoint-dir", default="checkpoints")
     ap.add_argument("--run-name", default=None)
+    ap.add_argument(
+        "--score-test",
+        action="store_true",
+        help="score the held-out test split once, after training - not by default",
+    )
     ap.add_argument("--tracker", choices=["aim", "none"], default="aim")
     ap.add_argument("--aim-repo", default=".aim", help="local disk only, never Lustre")
     ap.add_argument("--experiment", default="router-finetune")
@@ -83,6 +92,19 @@ def describe(built) -> str:
     return "\n".join(lines)
 
 
+def describe_references(outcomes, built) -> str:
+    """What the finetune has to beat, on the split it will be judged on.
+
+    Pure table lookups over results already in the database, so this costs
+    milliseconds and is printed before any GPU is touched.
+    """
+    validation = built.split(VALIDATION) or built.examples
+    scores = reference_scores(outcomes, keys=keys_of(validation))
+    lines = [f"reference policies on the {VALIDATION} split:"]
+    lines += [f"  {score.summary_line()}" for score in scores.values()]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> None:
     args = parse_args(argv)
 
@@ -94,8 +116,14 @@ def main(argv=None) -> None:
             datasets=args.datasets,
             seed=args.split_seed,
         )
+        outcomes = outcomes_for_runs(
+            store, run_ids=args.run_ids, datasets=args.datasets, model=args.model
+        )
 
     print(describe(built))
+    if built.examples:
+        print()
+        print(describe_references(outcomes, built))
     if args.dry_run:
         return
     if not built.examples:
@@ -122,6 +150,7 @@ def main(argv=None) -> None:
         seed=args.seed,
         checkpoint_dir=Path(args.checkpoint_dir),
         run_name=args.run_name,
+        score_test=args.score_test,
     )
     tracker = build_tracker(args)
     try:
@@ -131,6 +160,7 @@ def main(argv=None) -> None:
             encode=tokenizer_encoder(tokenizer),
             config=config,
             tracker=tracker,
+            outcomes=outcomes,
         )
     finally:
         tracker.close()
@@ -138,13 +168,20 @@ def main(argv=None) -> None:
     for metrics in result.history:
         print(
             f"epoch {metrics.epoch} {metrics.subset:<10} "
-            f"loss {metrics.loss:.4f}  accuracy {metrics.accuracy:.3f}"
+            f"loss {metrics.loss:.4f}  agreement {metrics.agreement:.3f}"
         )
+    print()
+    for evaluation in result.evaluations:
+        print(f"epoch {evaluation.epoch} {evaluation.report()}")
     print(f"\ncheckpoint: {result.checkpoint_path}")
     if args.tracker == "aim":
         print(f"browse the run: aim up --repo {args.aim_repo}")
-    held_out = built.split(TEST)
-    print(f"({len(held_out)} test-split queries left unscored - see issue #17)")
+    if not args.score_test:
+        held_out = built.split(TEST)
+        print(
+            f"({len(held_out)} test-split queries left unscored; "
+            f"--score-test scores them once, when a run is finished being tuned)"
+        )
 
 
 if __name__ == "__main__":
