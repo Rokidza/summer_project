@@ -4,7 +4,7 @@ Aim's repository is a collection of RocksDB databases. Those depend on POSIX
 locking and mmap semantics that network and parallel filesystems handle badly,
 so the repository belongs on local disk and nowhere else - never on Lustre, and
 never on a compute node's shared scratch. A cluster-side finetune records to a
-flat file instead and is replayed into Aim locally (#19).
+flat file instead (`jsonl_tracker.py`) and is replayed into Aim locally.
 
 Browse what it wrote:
 
@@ -18,6 +18,28 @@ from typing import Any, Mapping
 
 DEFAULT_REPO = ".aim"
 """Local disk, beside the results database, and git-ignored."""
+
+
+def _as_plotly(figure: Any):
+    """Aim wants a plotly figure; a replayed run carries plotly *JSON*.
+
+    Reconstructed here rather than in `replay`, so replay stays a pure push of
+    recorded calls into a tracker and its tests need neither Aim nor plotly.
+    """
+    if not isinstance(figure, Mapping):
+        return figure
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        # Aim's own Figure needs plotly too, so this is the whole figure path,
+        # not just replay. Nothing in the platform logs one yet - the confusion
+        # matrix is deliberately text - so it is worth saying which install is
+        # missing rather than letting an import error stand on its own.
+        raise ImportError(
+            "replaying a figure needs plotly: uv pip install --python "
+            ".venv/bin/python3 -e '.[train]'"
+        ) from exc
+    return go.Figure(dict(figure))
 
 
 class AimTracker:
@@ -58,7 +80,10 @@ class AimTracker:
         from aim import Figure
 
         self._run.track(
-            Figure(figure), name=name, step=step, context=dict(context or {})
+            Figure(_as_plotly(figure)),
+            name=name,
+            step=step,
+            context=dict(context or {}),
         )
 
     def log_text(self, name, text, *, step=None, context=None) -> None:

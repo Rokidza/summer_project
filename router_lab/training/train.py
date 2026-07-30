@@ -209,7 +209,10 @@ def train_router(
                 "loss", loss, step=epoch, context={"subset": each.subset}
             )
             tracker.log_metric(
-                "label_agreement", agreement, step=epoch, context={"subset": each.subset}
+                "label_agreement",
+                agreement,
+                step=epoch,
+                context={"subset": each.subset},
             )
             if outcomes is not None:
                 evaluations.append(

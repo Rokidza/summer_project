@@ -159,8 +159,12 @@ def test_realised_accuracy_is_logged_per_task_category():
 
     evaluate(split, ALL_BASELINE[:2], outcomes, subset=TRAIN, epoch=1, tracker=tracker)
 
-    assert tracker.metric_values("category_accuracy", subset=TRAIN, category="numeric") == [1.0]
-    assert tracker.metric_values("category_accuracy", subset=TRAIN, category="code") == [0.0]
+    assert tracker.metric_values(
+        "category_accuracy", subset=TRAIN, category="numeric"
+    ) == [1.0]
+    assert tracker.metric_values(
+        "category_accuracy", subset=TRAIN, category="code"
+    ) == [0.0]
 
 
 def test_a_confusion_matrix_is_logged_per_evaluation():

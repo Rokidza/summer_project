@@ -128,7 +128,7 @@ def test_a_partial_approach_matrix_is_excluded_from_the_score():
     assert score.accuracy == 0.0
 
 
-def test_a_query_no_approach_solved_scores_zero_for_every_policy():
+def test_a_query_no_approach_solved_is_a_miss_for_every_policy():
     table = table_of(
         rows("1", none=(False, 100), bon=(False, 400)),
         rows("2", none=(True, 100), bon=(True, 400)),
@@ -260,7 +260,7 @@ def test_scoring_can_be_scoped_to_one_dataset():
         rows("1", dataset="mmlu", none=(False, 100), bon=(True, 400)),
     )
     score = score_policy(
-        table, always_policy(table, BASELINE), keys=table.keys(dataset="mmlu")
+        table, always_policy(table, BASELINE), keys=table.query_keys(dataset="mmlu")
     )
 
     assert score.n_selected == 1
@@ -296,6 +296,37 @@ def test_an_empty_selection_scores_zero_rather_than_dividing_by_it():
     assert score.accuracy == 0.0
     assert score.coverage == 0.0
     assert score.cost_multiplier == 0.0
+
+
+def test_coverage_says_which_of_its_three_causes_lost_it():
+    table = table_of(
+        # Complete matrix, scored.
+        rows("1", none=(True, 100), bon=(True, 400)),
+        # Two-stage leftover: the sweep never ran bon here.
+        rows("2", none=(True, 100)),
+        # Complete, but the policy predicts an approach nothing ran.
+        rows("3", none=(True, 100), bon=(True, 400)),
+        # Complete, and the policy has no opinion.
+        rows("4", none=(True, 100), bon=(True, 400)),
+    )
+    score = score_policy(
+        table,
+        {("gsm8k", "1"): BASELINE, ("gsm8k", "2"): BASELINE, ("gsm8k", "3"): "mcts"},
+    )
+
+    assert (score.n_incomplete, score.n_unrun, score.n_abstained) == (1, 1, 1)
+    assert score.coverage == 0.25
+    why = score.why_uncovered()
+    assert "1 incomplete matrix" in why
+    assert "1 prediction never run" in why
+    assert "1 no prediction" in why
+    assert score.why_uncovered() in score.summary_line()
+
+
+def test_full_coverage_explains_nothing():
+    table = table_of(rows("1", none=(True, 100), bon=(True, 400)))
+
+    assert score_policy(table, always_policy(table, BASELINE)).why_uncovered() == ""
 
 
 def test_score_flattens_to_metrics_a_tracker_can_log():
@@ -368,6 +399,18 @@ def test_worst_misroutes_puts_lost_wins_before_overspending():
     assert "question 3" not in text
 
 
+def test_a_different_approach_at_no_extra_cost_is_not_a_misroute():
+    """The case the realised score exists for: right answer, same cost, other name.
+
+    Listing it would smuggle label agreement back in through the diagnostics.
+    """
+    table = table_of(rows("1", bon=(True, 400), moa=(True, 400)))
+    policy = {("gsm8k", "1"): "moa"}
+    labels = {("gsm8k", "1"): "bon"}
+
+    assert worst_misroutes(table, policy, labels) == []
+
+
 def test_worst_misroutes_reports_an_unrun_prediction_as_unknown():
     table = table_of(rows("1", none=(True, 100), bon=(True, 400)))
     misroutes = worst_misroutes(
@@ -427,16 +470,16 @@ def test_outcomes_for_runs_filters_by_run_dataset_and_model(store):
             "1", run_id="run-3", model="other", none=(True, 100), bon=(True, 400)
         )
     )
-    assert outcomes_for_runs(store, run_ids=["run-1"]).keys() == [("gsm8k", "1")]
-    assert outcomes_for_runs(store, datasets=["mmlu"]).keys() == [("mmlu", "1")]
-    assert outcomes_for_runs(store, model="other").keys() == [("gsm8k", "1")]
-    assert len(outcomes_for_runs(store, model="qwen3-8b").keys()) == 2
+    assert outcomes_for_runs(store, run_ids=["run-1"]).query_keys() == [("gsm8k", "1")]
+    assert outcomes_for_runs(store, datasets=["mmlu"]).query_keys() == [("mmlu", "1")]
+    assert outcomes_for_runs(store, model="other").query_keys() == [("gsm8k", "1")]
+    assert len(outcomes_for_runs(store, model="qwen3-8b").query_keys()) == 2
 
 
 def test_outcomes_for_runs_on_an_empty_database_scores_nothing(store):
     table = outcomes_for_runs(store)
 
-    assert table.keys() == []
+    assert table.query_keys() == []
     assert reference_scores(table)[ORACLE].n_selected == 0
 
 
@@ -458,3 +501,29 @@ def test_scoring_needs_no_deep_learning_stack():
         text=True,
     )
     assert probe.returncode == 0, probe.stderr
+
+
+def test_the_oracle_and_the_training_label_never_disagree(store):
+    """Two modules collapse a re-run query to one verdict; they must agree.
+
+    `build_examples` gets it from cell ordering and `OutcomeTable.from_results`
+    from comparing (run_id, model) - so the invariant is asserted rather than
+    asserted *about* in a docstring. A drift here would train a router against
+    one winner and score it against another.
+    """
+    from router_lab.training.examples import build_examples
+
+    store.write_results(
+        # Query 1 re-run in a later sweep, which the baseline then solved.
+        rows("1", run_id="run-1", none=(False, 100), bon=(True, 400))
+        + rows("1", run_id="run-2", none=(True, 100), bon=(True, 400))
+        # Query 2 run against a second served model, cheaper there.
+        + rows("2", run_id="run-3", model="a-model", none=(False, 100), bon=(True, 400))
+        + rows("2", run_id="run-3", model="b-model", none=(True, 100), bon=(True, 400))
+    )
+    built = build_examples(store)
+    oracle = oracle_policy(outcomes_for_runs(store))
+
+    assert oracle == {
+        (example.dataset, example.query_id): example.approach for example in built.examples
+    }

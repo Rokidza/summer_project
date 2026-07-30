@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from router_lab.policy import (
+    MISROUTE_LIMIT,
     OutcomeTable,
     PolicyScore,
     QueryKey,
@@ -107,9 +108,17 @@ def evaluate(
     epoch: int,
     tracker: Tracker,
     references: Mapping[str, PolicyScore] | None = None,
-    misroute_limit: int | None = None,
+    misroute_limit: int = MISROUTE_LIMIT,
 ) -> Evaluation:
-    """Score the model's predictions over one split and log the lot."""
+    """Score the model's predictions over one split and log the lot.
+
+    Two populations, deliberately: the realised score covers the split's queries
+    with a complete approach matrix (see `router_lab.policy`), while agreement
+    diagnostics - macro-F1 and the confusion matrix - cover every example in the
+    split, because a label exists for each one whether or not its outcome under
+    another approach is known. Coverage is logged alongside so the difference is
+    readable rather than implied.
+    """
     policy = as_policy(examples, predictions)
     labels = labels_of(examples)
     keys = keys_of(examples)
@@ -141,11 +150,7 @@ def evaluate(
         context=context,
     )
     misroutes = worst_misroutes(
-        outcomes,
-        policy,
-        labels,
-        keys=keys,
-        **({} if misroute_limit is None else {"limit": misroute_limit}),
+        outcomes, policy, labels, keys=keys, limit=misroute_limit
     )
     tracker.log_text(
         "misroutes", format_misroutes(misroutes), step=epoch, context=context
@@ -187,8 +192,11 @@ def log_headline(
     tracker.log_summary(f"{prefix}/coverage", evaluation.score.coverage)
     tracker.log_summary(f"{prefix}/macro_f1", evaluation.macro_f1)
     tracker.log_summary(f"{prefix}/n_scored", evaluation.score.n_scored)
+    tracker.log_summary(f"{prefix}/n_errors", evaluation.score.n_errors)
+    tracker.log_summary(f"{prefix}/uncovered", evaluation.score.why_uncovered())
     for name, reference in (references or {}).items():
-        tracker.log_summary(f"{prefix}/reference/{name}/realised_accuracy", reference.accuracy)
-        tracker.log_summary(f"{prefix}/reference/{name}/cost_multiplier", reference.cost_multiplier)
+        where = f"{prefix}/reference/{name}"
+        tracker.log_summary(f"{where}/realised_accuracy", reference.accuracy)
+        tracker.log_summary(f"{where}/cost_multiplier", reference.cost_multiplier)
         if reference.detail:
-            tracker.log_summary(f"{prefix}/reference/{name}/approach", reference.detail)
+            tracker.log_summary(f"{where}/approach", reference.detail)

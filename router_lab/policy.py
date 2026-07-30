@@ -28,11 +28,17 @@ queries has not been measured, and the score says so out loud.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Sequence
 
 from router_lab.datasets import DATASETS
-from router_lab.labels import BASELINE, META_APPROACHES, is_win, winning_approach
+from router_lab.labels import (
+    BASELINE,
+    META_APPROACHES,
+    ROUTER,
+    is_win,
+    winning_approach,
+)
 from router_lab.store import BenchmarkResult, ResultsStore
 
 QueryKey = tuple[str, str]
@@ -94,12 +100,8 @@ class QueryOutcomes:
     @property
     def router_approach(self) -> str | None:
         """What optillm's pretrained router picked, if it ran on this query."""
-        router = self.results.get("router")
+        router = self.results.get(ROUTER)
         return router.router_approach if router else None
-
-    @property
-    def any_correct(self) -> bool:
-        return any(is_win(result) for result in self.results.values())
 
     def outcome(self, approach: str) -> BenchmarkResult | None:
         """The row a policy predicting `approach` would have realised.
@@ -129,40 +131,35 @@ class OutcomeTable:
         rows per approach, so the newest (run_id, model) cell wins - the same
         collapse the example builder makes, so labels and outcomes agree.
         """
-        cells: dict[QueryKey, tuple[str, str]] = {}
-        grouped: dict[QueryKey, dict[str, BenchmarkResult]] = {}
-        questions: dict[QueryKey, str] = {}
+        by_cell: dict[QueryKey, dict[tuple[str, str], dict[str, BenchmarkResult]]] = {}
         for result in results:
             key = (result.dataset, result.query_id)
             cell = (result.run_id, result.model)
-            if key not in cells or cell > cells[key]:
-                if key in cells and cell != cells[key]:
-                    grouped[key] = {}
-                cells[key] = cell
-            elif cell < cells[key]:
-                continue
-            grouped.setdefault(key, {})[result.approach] = result
-            questions[key] = result.question
-        return cls(
-            queries={
-                key: QueryOutcomes(key=key, question=questions[key], results=rows)
-                for key, rows in sorted(grouped.items())
-            }
-        )
+            by_cell.setdefault(key, {}).setdefault(cell, {})[result.approach] = result
+
+        queries = {}
+        for key, cells in sorted(by_cell.items()):
+            rows = cells[max(cells)]
+            queries[key] = QueryOutcomes(
+                key=key,
+                question=next(iter(rows.values())).question,
+                results=rows,
+            )
+        return cls(queries=queries)
 
     @property
     def approaches(self) -> frozenset[str]:
         """Every technique run anywhere in the table - the full matrix."""
+        if not self.queries:
+            return frozenset()
         return frozenset().union(
             *(query.approaches for query in self.queries.values())
-        ) if self.queries else frozenset()
+        )
 
-    def keys(self, *, dataset: str | None = None) -> list[QueryKey]:
+    def query_keys(self, *, dataset: str | None = None) -> list[QueryKey]:
         """The queries in the table, optionally narrowed to one dataset."""
         return [
-            key
-            for key in self.queries
-            if dataset is None or key[0] == dataset
+            key for key in self.queries if dataset is None or key[0] == dataset
         ]
 
     def complete_keys(self, keys: Iterable[QueryKey] | None = None) -> list[QueryKey]:
@@ -170,14 +167,18 @@ class OutcomeTable:
         full = self.approaches
         return [
             key
-            for key in (self.keys() if keys is None else keys)
+            for key in (self.query_keys() if keys is None else keys)
             if key in self.queries and self.queries[key].approaches == full
         ]
 
     def select(self, keys: Iterable[QueryKey] | None) -> list[QueryKey]:
-        """Requested keys that the table actually holds, in table order."""
+        """Requested keys that the table actually holds, in table order.
+
+        `None` selects everything, which is what makes an unscoped score and a
+        split-scoped one the same code path.
+        """
         if keys is None:
-            return self.keys()
+            return self.query_keys()
         wanted = set(keys)
         return [key for key in self.queries if key in wanted]
 
@@ -197,6 +198,12 @@ class PolicyScore:
     baseline_tokens: int
     """The baseline's cost over the same scored queries - the cost denominator."""
     category_accuracy: dict[str, float]
+    n_incomplete: int = 0
+    """Selected queries the sweep never ran through every approach."""
+    n_abstained: int = 0
+    """Selected queries the policy had no opinion about."""
+    n_unrun: int = 0
+    """Selected queries whose predicted approach was never run against them."""
     detail: str = ""
     """Which approach a derived policy turned out to be, e.g. best_single's."""
 
@@ -208,12 +215,29 @@ class PolicyScore:
     @property
     def cost_multiplier(self) -> float:
         """Realised tokens as a multiple of always-baseline's, or 0 if unscored."""
-        return self.total_tokens / self.baseline_tokens if self.baseline_tokens else 0.0
+        if not self.baseline_tokens:
+            return 0.0
+        return self.total_tokens / self.baseline_tokens
 
     @property
     def coverage(self) -> float:
         """Share of the selected queries whose outcome is actually known."""
         return self.n_scored / self.n_selected if self.n_selected else 0.0
+
+    def why_uncovered(self) -> str:
+        """Which of the three causes lost the coverage, counted.
+
+        Coverage below 1 has three quite different meanings - the sweep did not
+        finish the matrix, the policy had no opinion, or it predicted something
+        never run - and a reader who cannot tell them apart cannot tell whether
+        the number is the sweep's fault or the router's.
+        """
+        causes = {
+            "incomplete matrix": self.n_incomplete,
+            "no prediction": self.n_abstained,
+            "prediction never run": self.n_unrun,
+        }
+        return ", ".join(f"{count} {cause}" for cause, count in causes.items() if count)
 
     def as_metrics(self) -> dict[str, float]:
         """Flat, primitive metrics a tracker can log as-is."""
@@ -226,10 +250,12 @@ class PolicyScore:
 
     def summary_line(self) -> str:
         detail = f" ({self.detail})" if self.detail else ""
+        why = self.why_uncovered()
         return (
             f"{self.name}{detail}: accuracy {self.accuracy:.3f}  "
             f"cost {self.cost_multiplier:.2f}x  "
-            f"coverage {self.coverage:.0%} ({self.n_scored}/{self.n_selected})"
+            f"coverage {self.coverage:.0%} ({self.n_scored}/{self.n_selected}"
+            f"{'; ' + why if why else ''})"
         )
 
 
@@ -256,16 +282,22 @@ def score_policy(
     baseline_tokens = 0
     per_category: dict[str, list[bool]] = {}
     n_scored = 0
+    n_incomplete = 0
+    n_abstained = 0
+    n_unrun = 0
 
     for key in selected:
         if key not in scoreable:
+            n_incomplete += 1
             continue
         query = table.queries[key]
         predicted = policy.get(key)
         if predicted is None:
+            n_abstained += 1
             continue
         outcome = query.outcome(predicted)
         if outcome is None:
+            n_unrun += 1
             continue
         baseline = query.outcome(BASELINE)
 
@@ -289,6 +321,9 @@ def score_policy(
             category: sum(flags) / len(flags)
             for category, flags in per_category.items()
         },
+        n_incomplete=n_incomplete,
+        n_abstained=n_abstained,
+        n_unrun=n_unrun,
         detail=detail,
     )
 
@@ -342,22 +377,15 @@ def best_single_policy(
     if not candidates:
         return BASELINE, {}
     scored = [
-        (
-            score_policy(table, always_policy(table, approach), keys=selected),
-            approach,
-        )
+        (score_policy(table, always_policy(table, approach), keys=selected), approach)
         for approach in candidates
     ]
-    best = max(
-        scored,
-        key=lambda pair: (pair[0].accuracy, -pair[0].total_tokens, _reverse(pair[1])),
+    # Sorted ascending on "worse", so `min` reads the tie-break in the order it
+    # is stated: most accurate, then cheapest, then alphabetically first.
+    best = min(
+        scored, key=lambda pair: (-pair[0].accuracy, pair[0].total_tokens, pair[1])
     )[1]
     return best, always_policy(table, best)
-
-
-def _reverse(name: str) -> tuple[int, ...]:
-    """Sort helper: makes `max` prefer the alphabetically earlier name."""
-    return tuple(-ord(char) for char in name)
 
 
 def reference_scores(
@@ -462,10 +490,10 @@ class Misroute:
 
 
 LOST_WIN = "lost win"
-UNKNOWN = "unrun prediction"
+UNRUN_PREDICTION = "unrun prediction"
 OVERSPEND = "overspend"
 
-_SEVERITY = {LOST_WIN: 3, UNKNOWN: 2, OVERSPEND: 1}
+_SEVERITY = {LOST_WIN: 3, UNRUN_PREDICTION: 2, OVERSPEND: 1}
 
 
 def worst_misroutes(
@@ -510,28 +538,33 @@ def worst_misroutes(
                 None if predicted_outcome is None else predicted_outcome.total_tokens
             ),
             label_tokens=label_outcome.total_tokens,
-            kind=_kind(predicted_correct, label_correct),
+            kind="",
         )
-        if misroute.kind:
-            misroutes.append(misroute)
+        kind = _kind(predicted_correct, label_correct, misroute.extra_tokens)
+        if kind:
+            misroutes.append(replace(misroute, kind=kind))
     misroutes.sort(
         key=lambda m: (-_SEVERITY[m.kind], -m.extra_tokens, m.key)
     )
     return misroutes[:limit]
 
 
-def _kind(predicted_correct: bool | None, label_correct: bool) -> str:
+def _kind(
+    predicted_correct: bool | None, label_correct: bool, extra_tokens: int
+) -> str:
     """Why a decision is worth looking at, or "" when it is not.
 
-    Picking a different approach that also worked is not a mistake unless it
-    cost more, and picking a losing approach on a query nothing solved is not
-    the router's fault.
+    Picking a *different* approach that solved the same query at no extra cost
+    is not a mistake at all - it is the case this whole module exists for, and
+    listing it as a misroute would reintroduce the label-agreement thinking the
+    realised score replaces. Picking a losing approach on a query nothing solved
+    is not the router's fault either.
     """
     if predicted_correct is None:
-        return UNKNOWN
+        return UNRUN_PREDICTION
     if label_correct and not predicted_correct:
         return LOST_WIN
-    if label_correct and predicted_correct:
+    if label_correct and predicted_correct and extra_tokens > 0:
         return OVERSPEND
     return ""
 

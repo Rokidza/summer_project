@@ -22,6 +22,10 @@ train = [
     "safetensors>=0.4",
     "huggingface-hub>=0.24",
     "aim>=3.25",
+    # Aim's Figure wraps a plotly figure and aim does not depend on plotly
+    # itself, so tracking one - or replaying one out of a JSONL run - needs it
+    # declared here.
+    "plotly>=5.20",
 ]
 
 [build-system]

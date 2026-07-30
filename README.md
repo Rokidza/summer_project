@@ -34,14 +34,15 @@ shows the lot in a local dashboard.
 | [router_lab/training/](router_lab/training/) | Finetuning optillm's router on the labels this platform makes. |
 | [run_eval.py](run_eval.py) | CLI for a sweep. |
 | [train_router.py](train_router.py) | CLI for a finetune. |
+| [replay_tracker.py](replay_tracker.py) | CLI to replay a cluster run's JSONL into the local Aim repository. |
 | [supek/](supek/) | Apptainer image, model staging, and PBS jobs for the cluster. |
 
 The dependency direction is strict: `dashboard → views → {store, labels}`, and
 `training → {store, labels, policy, datasets, grading}` with nothing pointing
-back. Nothing outside `store.py` writes SQL, nothing outside `dashboard.py` imports
-Streamlit, and nothing outside `training/aim_tracker.py` imports Aim. Within
-`training/`, only the modules that actually train import torch — building
-examples does not.
+back. Nothing outside `store.py` writes SQL, nothing outside `dashboard.py`
+imports Streamlit, and nothing outside `training/aim_tracker.py` imports Aim.
+Within `training/`, only the modules that actually train import torch — building
+examples and scoring outcomes do not.
 
 ## Running a sweep
 
@@ -173,7 +174,10 @@ Two rules make the numbers mean something:
   a policy predicting an unrun approach there has a genuinely *unknown* outcome.
   It is excluded and reported as missing coverage — never imputed, never assumed
   wrong. A policy scoring 0.9 over a fifth of the queries has not been measured,
-  and the score says so.
+  and the score says so. Coverage also states *which* of its three causes lost
+  it — an unfinished approach matrix, a policy with no opinion, or a prediction
+  never run — because those are the sweep's fault, an abstention, and the
+  router's reach respectively, and a bare percentage cannot tell them apart.
 - **Every policy goes through the same function.** Always-baseline, the best
   single approach, optillm's stock router (scored on the outcome of what it
   picked, not on its own row) and the oracle are scored exactly like the model
@@ -186,24 +190,68 @@ Two rules make the numbers mean something:
 `--dry-run` prints the reference scores too, so the bar a finetune has to clear
 is visible before a GPU is touched.
 
+Two populations are in play, deliberately: the realised score covers the split's
+complete-matrix queries, while the agreement diagnostics below cover every
+labelled example, since a label exists whether or not another approach's outcome
+on that query does. Coverage is logged beside them so the difference is readable
+rather than implied.
+
 Beside the headline numbers, the diagnostics that make a bad run explicable:
 macro-F1 (pooled accuracy flatters a majority-class predictor, and the majority
 class here is the baseline), realised accuracy per task category, a confusion
 matrix per evaluation, and the worst misroutes as inspectable text — query,
 prediction, label, and what actually happened, ranked so that throwing away a
-win the label's approach achieved outranks any amount of overspending. That last
-one is the training-side equivalent of the dashboard's per-query drill-down.
+win the label's approach achieved outranks any amount of overspending. Picking a
+*different* approach that solved the query at no extra cost is not listed at all
+— that is the case the realised score exists for, and calling it a misroute would
+smuggle label agreement back in through the diagnostics. That last one is the
+training-side equivalent of the dashboard's per-query drill-down.
 
 The test split is not scored unless a run asks for it with `--score-test`, and
 the headline never silently becomes the test score when it does: a test split
 scored on every run of a hyperparameter search is a validation split with extra
 steps.
 
+### Recording a cluster run: JSONL, then replay
+
 **Aim's repository lives on local disk and is never committed.** Its backend is
 a collection of RocksDB databases, which depend on POSIX locking and mmap
-semantics that parallel filesystems handle badly, so it must not be created on
-cluster storage. A cluster-side finetune will record to a flat file and replay
-it locally (#19).
+semantics that parallel filesystems handle badly — the same class of hazard the
+platform already avoids by packaging dependencies into a container image rather
+than unpacking a dependency tree onto Lustre. So it must never be created on
+cluster storage.
+
+A cluster-side finetune therefore records to one append-only file on the node's
+own disk, and the file is replayed into Aim once it is home:
+
+```bash
+# on a compute node
+python train_router.py --db results.sqlite --tracker jsonl
+
+# on the laptop, after syncing runs/ back
+python replay_tracker.py runs/router-20260730-1200.jsonl --aim-repo .aim
+aim up --repo .aim
+```
+
+A cluster run and a laptop run then sit side by side in one UI, comparable on
+identical metrics, without a tracker reaching across the network from a compute
+node. Which one a run uses is configuration and nothing else: the training loop
+is written against the `Tracker` protocol, and only
+[aim_tracker.py](router_lab/training/aim_tracker.py) imports Aim.
+
+Every call is flushed as it is made, so a job killed at walltime costs the epoch
+it was in rather than the run — the closing record is a nicety and replay does
+not need it. Replaying the same run twice is *refused*, not repeated: a duplicate
+run would be silently averaged into every comparison that included it. Two things
+are checked — a receipt written beside the file, and whether the Aim repository
+already holds a run replayed from this file's uid, which catches both a fresh
+copy synced down from the cluster and a replay that died half way. `--force`
+overrides both.
+
+Verified on the laptop by running the same finetune twice under one seed, once
+straight into Aim and once via JSONL and replay: identical parameters, metric
+series and text panels, differing only in the checkpoint filename (named after
+the run) and the provenance replay adds (`replay/source`, `replay/run_uid`).
 
 ## Concepts
 
@@ -285,7 +333,9 @@ Tests sit at the seams and use real-but-cheap dependencies rather than mocks:
   the suite ([tests/tiny_router.py](tests/tiny_router.py)), so the loop runs end
   to end with no network and no downloaded weights, and a recording `Tracker`
   ([tests/recording_tracker.py](tests/recording_tracker.py)) the tests assert
-  against — never Aim, and never an Aim repository.
+  against — never Aim, and never an Aim repository. Replay is tested by feeding
+  a JSONL file to that recording tracker and asserting the reconstructed call
+  sequence.
 - **The upstream contract** — the drift guard reads optillm's plugin as *source*
   rather than importing it, and skips when the checkout is absent.
 
