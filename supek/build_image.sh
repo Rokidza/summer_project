@@ -18,6 +18,11 @@ mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR" "$(dirname "$SIF")"
 echo "Building $SIF from $HERE/apptainer/router-lab.def"
 echo "  APPTAINER_TMPDIR=$APPTAINER_TMPDIR"
 
+# config.sh exports APPTAINER_BIND for runtime `apptainer exec`/`run`, so the
+# container can see the Lustre home. The build step must not inherit it: the
+# fresh container filesystem has no /lustre/home/$USER to mount onto, and
+# apptainer honors this variable during build too, so it fails the build.
+unset APPTAINER_BIND SINGULARITY_BIND
 apptainer build --force "$SIF" "$HERE/apptainer/router-lab.def"
 
 echo
