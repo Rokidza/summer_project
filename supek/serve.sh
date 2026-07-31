@@ -81,7 +81,7 @@ start_servers() {
     echo "  max-model-len=$MAX_MODEL_LEN max-num-seqs=$MAX_NUM_SEQS" \
          "gpu-memory-utilization=$GPU_MEMORY_UTILIZATION tp=$TENSOR_PARALLEL_SIZE"
     apptainer exec --nv "$SIF" \
-        python -m vllm.entrypoints.openai.api_server \
+        python3 -m vllm.entrypoints.openai.api_server \
             --model "$MODEL_DIR" \
             --served-model-name "$SERVED_MODEL_NAME" \
             --host "$BIND_HOST" --port "$VLLM_PORT" \
@@ -130,7 +130,7 @@ start_servers() {
     (
         cd "$OPTILLM_PLUGINS_DIR" || exit 1
         exec apptainer exec --nv "$SIF" \
-            python "$OPTILLM_DIR/optillm.py" \
+            python3 "$OPTILLM_DIR/optillm.py" \
                 --base_url "http://127.0.0.1:$VLLM_PORT/v1" \
                 --host "$BIND_HOST" \
                 --port "$OPTILLM_PORT" \

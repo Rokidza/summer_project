@@ -59,12 +59,13 @@ From: vllm/vllm-openai:v0.11.0
     # `apptainer test --nv router-lab.sif`. On a GPU node the CUDA check is the
     # meaningful one; on a CPU-only login node it reports and moves on.
     set -eu
-    python -c "import vllm; print('vllm', vllm.__version__)"
+    # The base image only ships python3, not a `python` symlink.
+    python3 -c "import vllm; print('vllm', vllm.__version__)"
     # optillm is not in the image by design - only its dependencies are, and
     # these are the ones its approaches actually fail on when missing.
-    python -c "import flask, z3, sympy, sklearn, networkx; print('optillm deps ok')"
-    python -c "import transformers, safetensors; print('router classifier deps ok')"
-    python -c "
+    python3 -c "import flask, z3, sympy, sklearn, networkx; print('optillm deps ok')"
+    python3 -c "import transformers, safetensors; print('router classifier deps ok')"
+    python3 -c "
 import torch
 print('torch', torch.__version__)
 print('cuda available:', torch.cuda.is_available())

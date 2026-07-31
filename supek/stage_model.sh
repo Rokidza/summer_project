@@ -42,7 +42,7 @@ find "$MODEL_DIR" -name '*.safetensors' -o -name '*.bin' | sed 's/^/  /'
 # discover a missing shard an hour into the queue.
 echo
 echo "Verifying it loads fully offline ..."
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 apptainer exec "$SIF" python -c "
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 apptainer exec "$SIF" python3 -c "
 from transformers import AutoConfig, AutoTokenizer
 config = AutoConfig.from_pretrained('$MODEL_DIR')
 AutoTokenizer.from_pretrained('$MODEL_DIR')
