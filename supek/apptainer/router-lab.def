@@ -29,6 +29,11 @@ From: vllm/vllm-openai:v0.11.0
     # --ignore-installed blinker: the base image ships blinker via distutils
     # (apt), which pip cannot safely uninstall to satisfy flask's dependency;
     # ignoring the preinstalled copy lets pip install its own without trying.
+    # regex>=2025.10.22 is pinned explicitly: pip's own resolver is satisfied
+    # by the base image's older regex (it only needs to differ from one old
+    # blocklisted version), but transformers enforces a stricter minimum via
+    # its own internal dependency_versions_table at import time, and pip never
+    # upgrades a requirement it already considers satisfied.
     pip install --no-cache-dir --ignore-installed blinker \
         "flask" \
         "z3-solver" \
@@ -37,6 +42,7 @@ From: vllm/vllm-openai:v0.11.0
         "networkx" \
         "datasets" \
         "openai" \
+        "regex>=2025.10.22" \
         "transformers" \
         "safetensors" \
         "huggingface_hub"
