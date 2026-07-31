@@ -26,7 +26,10 @@ From: vllm/vllm-openai:v0.11.0
     # would silently disable issue #12's entire comparison on cluster data.
     # Instead the checkout is staged on Lustre and run from there; see
     # OPTILLM_DIR in supek/config.sh.
-    pip install --no-cache-dir \
+    # --ignore-installed blinker: the base image ships blinker via distutils
+    # (apt), which pip cannot safely uninstall to satisfy flask's dependency;
+    # ignoring the preinstalled copy lets pip install its own without trying.
+    pip install --no-cache-dir --ignore-installed blinker \
         "flask" \
         "z3-solver" \
         "sympy" \
