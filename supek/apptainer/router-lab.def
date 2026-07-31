@@ -41,6 +41,13 @@ From: vllm/vllm-openai:v0.11.0
         "safetensors" \
         "huggingface_hub"
 
+    # scikit-learn's wheel loads scipy's compiled Cython utility module; if the
+    # base image already ships a scipy whose compiled .so files are not fully
+    # replaced by the upgrade above, the two end up binary-incompatible
+    # ("scipy._cyutility does not export expected C function"). Force a clean
+    # reinstall of just this pair so no stale base-image files survive.
+    pip install --no-cache-dir --force-reinstall --no-deps scipy scikit-learn
+
     # Neither optillm nor the harness is baked in: both are bind-mounted from
     # Lustre at run time, so editing a grading rule or an approach does not
     # mean rebuilding a multi-GB image.
