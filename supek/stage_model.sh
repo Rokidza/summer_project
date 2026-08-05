@@ -16,8 +16,9 @@ mkdir -p "$MODEL_DIR"
 
 echo "Staging $MODEL_REPO -> $MODEL_DIR"
 # Unset offline mode for this step only: config.sh exports it for job use.
+# huggingface-cli lives inside the image, not on the bare login node.
 HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-    huggingface-cli download "$MODEL_REPO" --local-dir "$MODEL_DIR"
+    apptainer exec "$SIF" huggingface-cli download "$MODEL_REPO" --local-dir "$MODEL_DIR"
 
 # The optillm router's classifier is also a HuggingFace download, and it is
 # fetched lazily on the first routed request - which happens on a worker node
@@ -26,9 +27,9 @@ HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
 echo
 echo "Staging the optillm router classifier ..."
 HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-    huggingface-cli download codelion/optillm-modernbert-large
+    apptainer exec "$SIF" huggingface-cli download codelion/optillm-modernbert-large
 HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-    huggingface-cli download answerdotai/ModernBERT-large
+    apptainer exec "$SIF" huggingface-cli download answerdotai/ModernBERT-large
 
 echo
 echo "Staged into $HF_HOME:"
