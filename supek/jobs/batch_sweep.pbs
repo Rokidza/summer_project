@@ -60,7 +60,7 @@ for dataset in $DATASETS; do
     echo
     echo "--- $dataset ------------------------------------------------"
     if apptainer exec --nv "$SIF" \
-        python run_eval.py \
+        python3 run_eval.py \
             --model "$SERVED_MODEL_NAME" \
             --base-url "http://127.0.0.1:$OPTILLM_PORT/v1" \
             --dataset "$dataset" \

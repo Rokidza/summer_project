@@ -66,7 +66,7 @@ if [ ! -f "$RESULTS_DB" ]; then
 fi
 
 if apptainer exec --nv "$SIF" \
-    python train_router.py \
+    python3 train_router.py \
         --db "$RESULTS_DB" \
         --regime full \
         --epochs "$EPOCHS" \
