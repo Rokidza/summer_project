@@ -49,6 +49,8 @@ From: vllm/vllm-openai:v0.11.0
     # (optillm/server.py: `from cerebras.cloud.sdk import Cerebras`), even
     # though this project never routes to Cerebras - so it must be installed
     # for optillm to import at all, not just to use that provider.
+    # math-verify: optillm/cepo/cepo.py imports it unconditionally too, and
+    # server.py imports cepo unconditionally - same failure mode as cerebras.
     pip install --no-cache-dir --ignore-installed blinker \
         "numpy<=2.2" \
         "flask" \
@@ -61,7 +63,8 @@ From: vllm/vllm-openai:v0.11.0
         "transformers>=4.48,<5" \
         "safetensors" \
         "huggingface_hub" \
-        "cerebras_cloud_sdk"
+        "cerebras_cloud_sdk" \
+        "math-verify"
 
     # scikit-learn's wheel loads scipy's compiled Cython utility module; if the
     # base image already ships a scipy whose compiled .so files are not fully
@@ -97,6 +100,7 @@ From: vllm/vllm-openai:v0.11.0
     # never routes to Cerebras - it must be installed just for optillm to
     # start.
     python3 -c "from cerebras.cloud.sdk import Cerebras; print('cerebras sdk ok')"
+    python3 -c "import math_verify; print('math_verify ok')"
     python3 -c "import transformers, safetensors; print('router classifier deps ok')"
     # numba backs vLLM's n-gram speculative-decoding proposer and is strict
     # about its numpy pin - see the numpy<=2.2 note in %post.
