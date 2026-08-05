@@ -80,6 +80,13 @@ start_servers() {
     echo "Starting vLLM: $MODEL_DIR as '$SERVED_MODEL_NAME'"
     echo "  max-model-len=$MAX_MODEL_LEN max-num-seqs=$MAX_NUM_SEQS" \
          "gpu-memory-utilization=$GPU_MEMORY_UTILIZATION tp=$TENSOR_PARALLEL_SIZE"
+    # PBS's cgroup GPU isolation exports CUDA_VISIBLE_DEVICES as GPU UUIDs
+    # (e.g. GPU-5733a8c2-...), not numeric indices. vLLM's device-capability
+    # lookup does int(CUDA_VISIBLE_DEVICES) and crashes on that. cgroups
+    # already restrict this job to exactly TENSOR_PARALLEL_SIZE GPUs, so they
+    # are always renumbered 0..N-1 regardless of physical UUID - override with
+    # plain indices for this command only.
+    CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((TENSOR_PARALLEL_SIZE - 1)))" \
     apptainer exec --nv "$SIF" \
         python3 -m vllm.entrypoints.openai.api_server \
             --model "$MODEL_DIR" \
