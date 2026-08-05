@@ -136,6 +136,13 @@ start_servers() {
     # baseline. smoke_test_router_ft is what refuses to let that pass.
     (
         cd "$OPTILLM_PLUGINS_DIR" || exit 1
+        # get_config() in optillm/server.py picks its upstream client by which
+        # API-key env var is set, falling back to a LiteLLM wrapper (an
+        # unrelated dependency we don't otherwise need) if none are. Setting a
+        # dummy OPENAI_API_KEY routes it through the plain OpenAI client
+        # instead, pointed at --base_url below - which is vLLM, and does not
+        # check the key.
+        export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
         exec apptainer exec --nv "$SIF" \
             python3 "$OPTILLM_DIR/optillm.py" \
                 --base_url "http://127.0.0.1:$VLLM_PORT/v1" \
