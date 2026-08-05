@@ -39,7 +39,14 @@ From: vllm/vllm-openai:v0.11.0
     # import time, which that shadowed old copy can never satisfy. The 4.x
     # line has no such check and still supports ModernBERT (added in 4.48),
     # which is all the router classifier needs.
+    #
+    # numpy is pinned to <=2.2: the base image ships numba (a vLLM dependency,
+    # used by its n-gram speculative-decoding proposer) built against NumPy
+    # <=2.2. scikit-learn has no numpy pin of its own, so without this it pulls
+    # the latest numpy and numba refuses to import ("Numba needs NumPy 2.2 or
+    # less"), which crashes vLLM's engine core at startup.
     pip install --no-cache-dir --ignore-installed blinker \
+        "numpy<=2.2" \
         "flask" \
         "z3-solver" \
         "sympy" \
@@ -82,6 +89,9 @@ From: vllm/vllm-openai:v0.11.0
     # these are the ones its approaches actually fail on when missing.
     python3 -c "import flask, z3, sympy, sklearn, networkx; print('optillm deps ok')"
     python3 -c "import transformers, safetensors; print('router classifier deps ok')"
+    # numba backs vLLM's n-gram speculative-decoding proposer and is strict
+    # about its numpy pin - see the numpy<=2.2 note in %post.
+    python3 -c "import numba, numpy; print('numba ok, numpy', numpy.__version__)"
     python3 -c "
 import torch
 print('torch', torch.__version__)
