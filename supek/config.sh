@@ -56,9 +56,15 @@
 # on context length nobody uses would serialise exactly the workloads this
 # platform exists to measure.
 #
-#   MAX_MODEL_LEN 8192   - comfortably over the longest benchmark prompt plus a
-#                          reasoning budget, and far below the model's ceiling.
-#                          Raise it per-run for a dataset that genuinely needs it.
+#   MAX_MODEL_LEN 32768  - 8192 turned out too tight in practice: Qwen3 is a
+#                          thinking model whose <think> block alone can eat a
+#                          four-figure token budget, and multi-turn approaches
+#                          (moa, plansearch) accumulate prior turns into the
+#                          prompt - a job run measured prompts up to ~11k
+#                          tokens on their own. At 8192, vLLM's own logged GPU
+#                          KV cache usage peaked at under 10% even with 25
+#                          concurrent requests, so there was ample headroom to
+#                          spend on context instead of leaving it idle.
 #   MAX_NUM_SEQS 256     - deep enough that a fan-out approach's branches run
 #                          together rather than queueing behind each other.
 #   GPU_MEMORY_UTILIZATION 0.90
@@ -68,7 +74,7 @@
 #                          instead of OOM-ing the server mid-sweep.
 #   TENSOR_PARALLEL_SIZE 1
 #                        - must equal the ngpus in the job's select statement.
-: "${MAX_MODEL_LEN:=8192}"
+: "${MAX_MODEL_LEN:=32768}"
 : "${MAX_NUM_SEQS:=256}"
 : "${GPU_MEMORY_UTILIZATION:=0.90}"
 : "${TENSOR_PARALLEL_SIZE:=1}"
