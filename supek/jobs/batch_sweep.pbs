@@ -31,7 +31,13 @@ source supek/serve.sh
 : "${DATASETS:=gsm8k math500 boolq mmlu humaneval}"
 : "${LIMIT:=100}"
 : "${CONCURRENCY:=16}"
-: "${MAX_TOKENS:=1536}"
+# Qwen3 is a thinking model: it wraps every answer in a <think>...</think>
+# reasoning block before the real content. 1536 was too tight - approaches
+# that make their own sub-calls with this budget (rto, re2, leap) would burn
+# it entirely on reasoning and return empty/truncated completions once the
+# thinking block was stripped. 6144 leaves reasoning room while still fitting
+# well inside MAX_MODEL_LEN=8192 alongside the prompt.
+: "${MAX_TOKENS:=6144}"
 
 # One run id for the whole sweep, so every dataset and approach below lands in
 # the store as a single identifiable run.
