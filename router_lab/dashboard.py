@@ -103,7 +103,7 @@ def render_leaderboard(store: ResultsStore, run_id: str, dataset, model) -> None
                     "dataset": r.dataset,
                     "model": r.model,
                     "n": r.n,
-                    "accuracy": r.accuracy,
+                    "accuracy": r.accuracy * 100,
                     "delta vs none (pp)": r.delta_pp,
                     "errors": r.errors,
                     "avg latency (s)": r.avg_latency_s,
@@ -127,7 +127,7 @@ def render_leaderboard(store: ResultsStore, run_id: str, dataset, model) -> None
             [
                 {
                     "cost x": r.cost_multiplier or 1.0,
-                    "accuracy": r.accuracy,
+                    "accuracy": r.accuracy * 100,
                     "approach": r.approach,
                 }
                 for r in rows
@@ -199,17 +199,17 @@ def render_router_comparison(report: RouterComparison, scope: str) -> None:
             [
                 {
                     "strategy": "always baseline (`none`)",
-                    "accuracy": report.baseline_accuracy,
+                    "accuracy": report.baseline_accuracy * 100,
                     "tokens": report.baseline_tokens,
                 },
                 {
                     "strategy": f"`{report.router}`",
-                    "accuracy": report.router_accuracy,
+                    "accuracy": report.router_accuracy * 100,
                     "tokens": report.router_tokens,
                 },
                 {
                     "strategy": "oracle (always the actual winner)",
-                    "accuracy": report.oracle_accuracy,
+                    "accuracy": report.oracle_accuracy * 100,
                     "tokens": report.oracle_tokens,
                 },
             ]
