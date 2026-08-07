@@ -30,7 +30,12 @@ source supek/serve.sh
 : "${APPROACHES:=none mcts bon moa rto z3 self_consistency pvg rstar cot_reflection plansearch leap re2 router}"
 : "${DATASETS:=gsm8k math500 boolq mmlu humaneval}"
 : "${LIMIT:=100}"
-: "${CONCURRENCY:=16}"
+: "${CONCURRENCY:=64}"
+# 16 left the server idle: MAX_NUM_SEQS is 256, and a controlled A/B (500
+# queries, none+moa, identical scope) measured kv_cache_usage_perc peaking
+# under 11% and num_requests_waiting at 0 throughout even at 64 - the client
+# was the bottleneck, not the GPU. 64 cut the same sweep's wall time from
+# 43m34s to 33m56s (-22%) with identical moa accuracy and zero errors.
 # Qwen3 is a thinking model: it wraps every answer in a <think>...</think>
 # reasoning block before the real content. 1536 was too tight - approaches
 # that make their own sub-calls with this budget (rto, re2, leap) would burn
