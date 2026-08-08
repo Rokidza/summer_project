@@ -352,6 +352,23 @@ class ResultsStore:
             for row in rows
         ]
 
+    def completed_query_ids(
+        self, *, run_id: str, dataset: str, model: str, approach: str
+    ) -> set[str]:
+        """Query ids already durably recorded, without error, for one cell.
+
+        Errored rows are excluded so a resumed sweep retries them instead of
+        treating a prior failure as done - only a clean result counts as work
+        that does not need repeating.
+        """
+        rows = self._fetch(
+            "SELECT query_id FROM results "
+            "WHERE run_id = ? AND dataset = ? AND model = ? AND approach = ? "
+            "AND error IS NULL",
+            (run_id, dataset, model, approach),
+        )
+        return {row["query_id"] for row in rows}
+
     def query_ids(
         self, *, run_id: str, dataset: str, model: str
     ) -> list[str]:

@@ -60,6 +60,14 @@ def parse_args(argv=None):
         help="defaults to a timestamp; reuse one to extend an existing run",
     )
     ap.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "redo every problem even if this --run-id already has clean "
+            "results for it (default: skip what already completed)"
+        ),
+    )
+    ap.add_argument(
         "--two-stage",
         action="store_true",
         help="baseline first, then the rest only where the baseline failed",
@@ -120,6 +128,7 @@ def main(argv=None) -> None:
                 settings=settings,
                 control_fraction=args.control_fraction,
                 seed=args.seed,
+                resume=not args.no_resume,
             )
         else:
             run_sweep(
@@ -129,6 +138,7 @@ def main(argv=None) -> None:
                 approaches=args.approaches,
                 problems=problems,
                 settings=settings,
+                resume=not args.no_resume,
             )
         rows = leaderboard(
             store, run_id=run_id, dataset=args.dataset, model=args.model

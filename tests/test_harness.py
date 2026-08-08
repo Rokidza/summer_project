@@ -40,7 +40,15 @@ def settings_for(server, **overrides):
     return SweepSettings(**fields)
 
 
-def sweep(store, server, *, approaches=("none",), problems=(PROBLEM,), **overrides):
+def sweep(
+    store,
+    server,
+    *,
+    approaches=("none",),
+    problems=(PROBLEM,),
+    resume=True,
+    **overrides,
+):
     run_sweep(
         store,
         run_id="run-1",
@@ -49,6 +57,7 @@ def sweep(store, server, *, approaches=("none",), problems=(PROBLEM,), **overrid
         problems=list(problems),
         settings=settings_for(server, **overrides),
         show_progress=False,
+        resume=resume,
     )
 
 
@@ -341,6 +350,56 @@ def test_a_two_stage_sweep_killed_mid_flight_keeps_the_work_it_finished(db_path)
         assert len(store.query_results(approach="none")) == len(POOL)
         assert len(store.query_results(approach="bon")) == 2
         assert store.sweep_configs(run_id="run-1")[0].mode == "two-stage"
+
+
+def test_resuming_the_same_run_id_skips_completed_work_and_finishes_the_rest(db_path):
+    """The mid-flight crash's real point: reusing --run-id should pick up where
+    it died, hitting the server only for what never finished - not redoing it."""
+    dying = StoreThatDies.open_at(db_path, crash_after=len(POOL) + 2)
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on(*(p.id for p in POOL))
+        with pytest.raises(RuntimeError):
+            two_stage(dying, server, approaches=("none", "bon"), concurrency=1)
+    dying.close()
+
+    with ResultsStore.open(db_path) as store:
+        already = len(store.query_results(approach="none")) + len(
+            store.query_results(approach="bon")
+        )
+
+    with ResultsStore.open(db_path) as store, FakeInferenceServer() as server:
+        server.responder = answers_wrong_on(*(p.id for p in POOL))
+        two_stage(store, server, approaches=("none", "bon"), concurrency=1)
+        # Only the work the crashed run never completed should have gone out
+        # over the wire this time - not the whole pool again.
+        assert len(server.requests) == 2 * len(POOL) - already
+
+        assert len(store.query_results(approach="none")) == len(POOL)
+        assert len(store.query_results(approach="bon")) == len(POOL)
+
+
+def test_a_row_that_recorded_an_error_is_retried_on_resume(store):
+    with FakeInferenceServer() as server:
+        server.replies = [500]
+        sweep(store, server, approaches=("none",), retries=0)
+
+    [row] = store.query_results(approach="none")
+    assert row.error is not None
+
+    with FakeInferenceServer() as server:
+        sweep(store, server, approaches=("none",))
+
+    [row] = store.query_results(approach="none")
+    assert row.error is None
+
+
+def test_no_resume_redoes_everything_even_if_already_done(store):
+    with FakeInferenceServer() as server:
+        sweep(store, server, approaches=("none",))
+
+    with FakeInferenceServer() as server:
+        sweep(store, server, approaches=("none",), resume=False)
+        assert len(server.requests) == 1
 
 
 def test_the_sweep_configuration_is_recorded_for_the_run(store):

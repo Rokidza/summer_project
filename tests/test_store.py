@@ -220,6 +220,21 @@ def test_configurations_of_other_runs_are_not_returned(store):
     assert [c.run_id for c in store.sweep_configs(run_id="run-2")] == ["run-2"]
 
 
+def test_completed_query_ids_returns_only_clean_rows_for_the_exact_cell(store):
+    store.write_result(make_result(query_id="1", approach="none", error=None))
+    store.write_result(make_result(query_id="2", approach="none", error="boom"))
+    store.write_result(make_result(query_id="3", approach="bon", error=None))
+    store.write_result(
+        make_result(query_id="1", approach="none", run_id="run-2", error=None)
+    )
+
+    completed = store.completed_query_ids(
+        run_id="run-1", dataset="gsm8k", model="qwen3-8b", approach="none"
+    )
+
+    assert completed == {"1"}
+
+
 def test_approach_coverage_is_derived_from_the_stored_results(store):
     """Coverage is never written down - it is counted off the rows themselves,
     so it cannot drift away from them."""

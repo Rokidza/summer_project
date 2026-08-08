@@ -170,16 +170,47 @@ def run_approach(
     category: str,
     settings: SweepSettings,
     show_progress: bool = True,
+    resume: bool = True,
 ) -> list[BenchmarkResult]:
     """Run every problem through one approach, writing results as they land.
 
-    Returns what it wrote, so a caller that must decide something from this
-    approach's outcomes - stage one of a two-stage sweep - does not have to read
-    the rows back out of the store.
+    Returns every result for this cell - both what it wrote this call and, on
+    a resume, what a prior call already wrote - so a caller that must decide
+    something from this approach's outcomes (stage one of a two-stage sweep)
+    sees the whole picture without reading the store back out itself.
+
+    With `resume` (the default), problems already recorded without an error
+    under this exact (run_id, dataset, model, approach) are skipped rather
+    than re-run. This is what makes restarting a sweep after a crash, `qdel`,
+    or walltime cutoff cheap: reuse the same `--run-id` and only the work that
+    never finished gets redone. A row that recorded an error is not treated as
+    done, so a resume retries it.
     """
-    done = 0
-    correct = 0
+    already: set[str] = set()
+    if resume:
+        problem_ids = {p.id for p in problems}
+        already = store.completed_query_ids(
+            run_id=run_id, dataset=dataset, model=settings.model, approach=approach
+        ) & problem_ids
+
     written: list[BenchmarkResult] = []
+    if already:
+        written.extend(
+            r
+            for r in store.query_results(
+                run_id=run_id, dataset=dataset, approach=approach, model=settings.model
+            )
+            if r.query_id in already
+        )
+        if show_progress:
+            print(
+                f"  [{approach}] resume: {len(already)}/{len(problems)} "
+                f"already done, {len(problems) - len(already)} to go"
+            )
+
+    todo = [p for p in problems if p.id not in already]
+    done = 0
+    correct = sum(r.correct for r in written)
     with ThreadPoolExecutor(max_workers=settings.concurrency) as pool:
         futures = [
             pool.submit(
@@ -192,7 +223,7 @@ def run_approach(
                 category=category,
                 settings=settings,
             )
-            for problem in problems
+            for problem in todo
         ]
         for future in as_completed(futures):
             result = future.result()
@@ -202,12 +233,12 @@ def run_approach(
             correct += result.correct
             if show_progress:
                 print(
-                    f"  [{approach}] {done}/{len(problems)}  "
-                    f"running acc {correct / done:.1%}",
+                    f"  [{approach}] {done}/{len(todo)}  "
+                    f"running acc {correct / (len(already) + done):.1%}",
                     end="\r",
                     flush=True,
                 )
-    if show_progress:
+    if show_progress and todo:
         print()
     return written
 
@@ -221,11 +252,14 @@ def run_sweep(
     problems: Sequence[Problem],
     settings: SweepSettings,
     show_progress: bool = True,
+    resume: bool = True,
 ) -> None:
     """Run every approach across every problem, recording into the store.
 
     Results are written per-approach as they complete, so a sweep that dies
-    part-way leaves the work it already did behind in the database.
+    part-way leaves the work it already did behind in the database. With
+    `resume` (the default), rerunning this same `run_id` skips whatever
+    already completed cleanly instead of redoing it - see `run_approach`.
     """
     category = category_of(dataset)
     client = _client(settings)
@@ -252,6 +286,7 @@ def run_sweep(
             category=category,
             settings=settings,
             show_progress=show_progress,
+            resume=resume,
         )
 
 
@@ -294,6 +329,7 @@ def run_two_stage_sweep(
     control_fraction: float = 0.1,
     seed: int = 0,
     show_progress: bool = True,
+    resume: bool = True,
 ) -> None:
     """Sweep in two stages, spending the fan-out only where it can change a label.
 
@@ -303,7 +339,9 @@ def run_two_stage_sweep(
 
     Both stages write under one `run_id`, so a two-stage sweep is one run; and
     as with `run_sweep`, results land as they complete, so a sweep that dies
-    part-way leaves its finished work behind.
+    part-way leaves its finished work behind. With `resume` (the default),
+    rerunning this same `run_id` skips whatever already completed cleanly in
+    either stage - see `run_approach`.
     """
     category = category_of(dataset)
     client = _client(settings)
@@ -332,6 +370,7 @@ def run_two_stage_sweep(
         category=category,
         settings=settings,
         show_progress=show_progress,
+        resume=resume,
     )
 
     remaining = [approach for approach in approaches if approach != BASELINE]
@@ -362,4 +401,5 @@ def run_two_stage_sweep(
             category=category,
             settings=settings,
             show_progress=show_progress,
+            resume=resume,
         )
