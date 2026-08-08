@@ -43,6 +43,17 @@ source supek/serve.sh
 # thinking block was stripped. 6144 leaves reasoning room while still fitting
 # well inside MAX_MODEL_LEN=8192 alongside the prompt.
 : "${MAX_TOKENS:=6144}"
+# Label-generation runs set TWO_STAGE=1: baseline (none) over the whole pool
+# first, then the rest of $APPROACHES only on what it got wrong plus a
+# control sample - see run_eval.py --two-stage. Off by default because most
+# ad-hoc sweeps want every approach on every query.
+: "${TWO_STAGE:=0}"
+: "${CONTROL_FRACTION:=0.1}"
+: "${SEED:=0}"
+TWO_STAGE_ARGS=()
+if [ "$TWO_STAGE" = "1" ]; then
+    TWO_STAGE_ARGS=(--two-stage --control-fraction "$CONTROL_FRACTION" --seed "$SEED")
+fi
 
 # One run id for the whole sweep, so every dataset and approach below lands in
 # the store as a single identifiable run.
@@ -81,6 +92,7 @@ for dataset in $DATASETS; do
             --max-tokens "$MAX_TOKENS" \
             --run-id "$RUN_ID" \
             --db "$RESULTS_DB" \
+            "${TWO_STAGE_ARGS[@]}" \
         2>&1 | tee "$LOGDIR/eval_$dataset.log"
     then
         echo "--- $dataset done"
