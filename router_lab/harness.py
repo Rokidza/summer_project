@@ -290,6 +290,21 @@ def run_sweep(
         )
 
 
+CHEAP_TIER = frozenset({"cot_reflection", "re2", "leap", "z3", "rto"})
+"""Single-call approaches whose average cost sits near the baseline's.
+
+A query the baseline answered correctly does *not* mean the baseline was the
+cheapest correct option: an audit of the complete-matrix subset found that,
+of the queries where the baseline was correct, a cheaper correct alternative
+existed 96% of the time - almost always one of these. Restricting them to
+`select_stage_two`'s selection (as the expensive tier still is) would mislabel
+most of the pool as `none`. They run on every query regardless of stage one's
+outcome; only the expensive, fan-out approaches stay restricted to
+baseline-wrong-plus-control, since those essentially never beat the baseline's
+cost when the baseline was already correct.
+"""
+
+
 def select_stage_two(
     problems: Sequence[Problem],
     baseline_results: Sequence[BenchmarkResult],
@@ -297,19 +312,26 @@ def select_stage_two(
     control_fraction: float,
     seed: int,
 ) -> list[Problem]:
-    """The queries stage two owes work: every baseline failure, plus a control.
+    """The queries the expensive tier owes work: every baseline failure, plus a
+    control.
 
-    A query the baseline answered correctly already has its label - the label
-    rule makes the baseline the automatic winner there - so running twelve more
-    approaches on it buys a known outcome. The control sample is the exception:
-    without some of the solved queries also being run through every approach,
-    dataset-level accuracy and cost comparisons would only ever be drawn from
-    the hard end of the pool.
+    This selection is for the *expensive* (fan-out, multi-sample) approaches
+    only - see `CHEAP_TIER`'s docstring for why the cheap tier instead runs on
+    every query. Restricting the expensive tier is still sound: none of them
+    was ever observed to beat the baseline's cost when the baseline was
+    already correct, so the label they could only ever contribute there is one
+    the cheap tier would already have recorded more cheaply.
+
+    The control sample exists so that, even for the expensive tier, some
+    already-solved queries still get run through every approach - without it,
+    dataset-level accuracy and cost comparisons for those approaches would
+    only ever be drawn from the hard end of the pool.
 
     What counts as the baseline having answered is `labels.is_win`, so an
-    errored result is not a win and its query goes to stage two. The sample is
-    drawn in pool order rather than in the order stage one's concurrent results
-    happened to land, so the same seed picks the same control every time.
+    errored result is not a win and its query goes to the expensive tier. The
+    sample is drawn in pool order rather than in the order stage one's
+    concurrent results happened to land, so the same seed picks the same
+    control every time.
     """
     solved = {r.query_id for r in baseline_results if is_win(r)}
     control_pool = [p.id for p in problems if p.id in solved]
@@ -334,8 +356,10 @@ def run_two_stage_sweep(
     """Sweep in two stages, spending the fan-out only where it can change a label.
 
     Stage one runs the baseline alone across the whole pool. Stage two runs
-    every other approach over `select_stage_two`'s selection. The baseline runs
-    whether or not it was requested, since stage two is defined against it.
+    the cheap tier (see `CHEAP_TIER`) over every problem - a query the baseline
+    solved can still have a cheaper correct winner - and the expensive tier
+    over `select_stage_two`'s selection only. The baseline runs whether or not
+    it was requested, since both tiers are defined against it.
 
     Both stages write under one `run_id`, so a two-stage sweep is one run; and
     as with `run_sweep`, results land as they complete, so a sweep that dies
@@ -377,6 +401,30 @@ def run_two_stage_sweep(
     if not remaining:
         return
 
+    cheap = [approach for approach in remaining if approach in CHEAP_TIER]
+    expensive = [approach for approach in remaining if approach not in CHEAP_TIER]
+
+    if cheap and show_progress:
+        print(f"Stage 2 (cheap tier): {len(problems)}/{len(problems)} problems ({len(cheap)} approaches) ...")
+    for approach in cheap:
+        if show_progress:
+            print(f"Running {approach} ...")
+        run_approach(
+            store,
+            client,
+            problems,
+            run_id=run_id,
+            dataset=dataset,
+            approach=approach,
+            category=category,
+            settings=settings,
+            show_progress=show_progress,
+            resume=resume,
+        )
+
+    if not expensive:
+        return
+
     stage_two = select_stage_two(
         problems,
         baseline_results,
@@ -385,10 +433,10 @@ def run_two_stage_sweep(
     )
     if show_progress:
         print(
-            f"Stage 2: {len(stage_two)}/{len(problems)} problems "
-            f"({len(remaining)} approaches) ..."
+            f"Stage 2 (expensive tier): {len(stage_two)}/{len(problems)} problems "
+            f"({len(expensive)} approaches) ..."
         )
-    for approach in remaining:
+    for approach in expensive:
         if show_progress:
             print(f"Running {approach} ...")
         run_approach(

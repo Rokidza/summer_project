@@ -303,6 +303,30 @@ def test_every_non_baseline_approach_runs_in_stage_two(store):
     assert queries_touched(store, "moa") == {"4"}
 
 
+def test_the_cheap_tier_runs_on_the_whole_pool_not_just_stage_two(store):
+    """A cheap approach can beat the baseline's cost even where it was correct,
+    so it needs a chance to compete everywhere - not just where it was wrong."""
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(store, server, approaches=("none", "cot_reflection"), control_fraction=0.0)
+
+    assert queries_touched(store, "cot_reflection") == {"1", "2", "3", "4", "5", "6"}
+
+
+def test_the_expensive_tier_still_runs_only_on_what_the_baseline_got_wrong(store):
+    with FakeInferenceServer() as server:
+        server.responder = answers_wrong_on("2")
+        two_stage(
+            store,
+            server,
+            approaches=("none", "cot_reflection", "bon"),
+            control_fraction=0.0,
+        )
+
+    assert queries_touched(store, "cot_reflection") == {"1", "2", "3", "4", "5", "6"}
+    assert queries_touched(store, "bon") == {"2"}
+
+
 def test_the_baseline_runs_once_even_when_it_is_not_requested(store):
     """Stage one is the baseline by definition - the label rule needs it."""
     with FakeInferenceServer() as server:
