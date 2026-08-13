@@ -1,0 +1,101 @@
+#!/bin/bash
+# Hyperparameter search for the laptop-viable regimes (default: head-only) -
+# the A100 turns a 4-5 hour laptop run into minutes, so trying several learning
+# rates is cheap here in a way it is not on a 4GB GPU.
+#
+# Unlike finetune_full.pbs (issue #21, --regime full only), this job takes
+# REGIME as a parameter: it exists to compare candidates before committing to
+# the fully-unfrozen escape hatch, not to replace it.
+#
+#     qsub supek/jobs/finetune_head.pbs
+#     qsub -v LEARNING_RATE=1e-4,RUN_NAME=head-lr1e-4 supek/jobs/finetune_head.pbs
+#     qsub -v REGIME=top_layers,UNFROZEN_LAYERS=4,LEARNING_RATE=1e-5 supek/jobs/finetune_head.pbs
+#
+# Records through the JSONL tracker, never Aim: Aim's RocksDB backend must
+# never be given a repository on cluster storage. Afterwards, pull the JSONL
+# and the checkpoint down with the existing sync workflow and replay the run
+# into the local Aim repo, landing beside the laptop's runs:
+#
+#     ./supek/sync_results.sh
+#     python replay_tracker.py runs/router-<run-name>.jsonl
+#     aim up --repo .aim
+#
+#PBS -N router_lab_finetune_head
+#PBS -q gpu
+#PBS -l select=1:ngpus=1:ncpus=8:mem=64gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -uo pipefail
+
+cd "$PBS_O_WORKDIR" || exit 1
+source supek/config.sh
+
+# No vLLM, no optillm - this is a training job, not a serving one.
+: "${REGIME:=head}"
+: "${UNFROZEN_LAYERS:=4}"
+: "${EPOCHS:=3}"
+: "${BATCH_SIZE:=8}"
+: "${LEARNING_RATE:=1e-3}"
+: "${WEIGHT_DECAY:=0.01}"
+: "${CLASS_WEIGHTS:=balanced}"
+: "${SPLIT_SEED:=0}"
+: "${SEED:=0}"
+
+RUN_NAME="${RUN_NAME:-$REGIME-$(date +%Y%m%d-%H%M%S)}"
+TRACKER_FILE="$TRAINING_RUNS_DIR/router-$RUN_NAME.jsonl"
+LOGDIR="$PBS_O_WORKDIR/logs/$PBS_JOBID"
+mkdir -p "$LOGDIR" "$TRAINING_RUNS_DIR" "$CHECKPOINT_DIR"
+
+echo "=============================================================="
+echo "  Router finetune hyperparameter run  (job $PBS_JOBID on $(hostname))"
+echo "  run name:       $RUN_NAME"
+echo "  results db:     $RESULTS_DB"
+echo "  regime:         $REGIME"
+echo "  unfrozen layers: $UNFROZEN_LAYERS (only used by top_layers)"
+echo "  epochs:         $EPOCHS"
+echo "  learning rate:  $LEARNING_RATE"
+echo "  tracker file:   $TRACKER_FILE"
+echo "  checkpoint:     $CHECKPOINT_DIR/router-$RUN_NAME.pt"
+echo "=============================================================="
+
+if [ ! -f "$RESULTS_DB" ]; then
+    echo "!!! no results database at $RESULTS_DB - run a sweep first" >&2
+    exit 1
+fi
+
+if apptainer exec --nv "$SIF" \
+    python3 train_router.py \
+        --db "$RESULTS_DB" \
+        --regime "$REGIME" \
+        --unfrozen-layers "$UNFROZEN_LAYERS" \
+        --epochs "$EPOCHS" \
+        --batch-size "$BATCH_SIZE" \
+        --learning-rate "$LEARNING_RATE" \
+        --weight-decay "$WEIGHT_DECAY" \
+        --class-weights "$CLASS_WEIGHTS" \
+        --split-seed "$SPLIT_SEED" \
+        --seed "$SEED" \
+        --device cuda \
+        --checkpoint-dir "$CHECKPOINT_DIR" \
+        --run-name "$RUN_NAME" \
+        --tracker jsonl \
+        --tracker-file "$TRACKER_FILE" \
+        --experiment router-finetune \
+    2>&1 | tee "$LOGDIR/train.log"
+then
+    echo
+    echo "=============================================================="
+    echo "  Finetune $RUN_NAME complete."
+    echo "  metrics:    $TRACKER_FILE"
+    echo "  checkpoint: $CHECKPOINT_DIR/router-$RUN_NAME.pt"
+    echo
+    echo "  Pull both down and replay into the local Aim repo:"
+    echo "      ./supek/sync_results.sh"
+    echo "      python replay_tracker.py runs/router-$RUN_NAME.jsonl"
+    echo "      aim up --repo .aim"
+    echo "=============================================================="
+else
+    echo "!!! finetune FAILED - see $LOGDIR/train.log" >&2
+    exit 1
+fi
